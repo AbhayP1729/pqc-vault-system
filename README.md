@@ -229,15 +229,15 @@ npx hardhat test test/MultiAdminVault.ts
 - `Faucet requires mainnet ETH`: some Sepolia faucets use anti-abuse checks. Use a different Sepolia faucet, a provider-backed faucet, or transfer test ETH from another funded Sepolia wallet.
 - `Frontend cannot reach backend`: the frontend points to `http://localhost:8000` in `frontend/Q-DAY-VAULT/src/api.js`. If your backend runs elsewhere, update that file and keep `BACKEND_CORS_ORIGINS` in sync.
 
-## 13. Screenshots (Optional placeholders)
-**Dashboard**  
-_Add a screenshot of the main dashboard with the connected MetaMask wallet, vault cards, and recent proposals._
+## 13. Screenshots 
+<img width="1364" height="635" alt="Screenshot 2026-04-15 154031" src="https://github.com/user-attachments/assets/895dbded-011e-4e00-858f-f6187e351059" />
+<img width="1365" height="636" alt="Screenshot 2026-04-15 154106" src="https://github.com/user-attachments/assets/38b2ea61-08c4-470b-9ff8-2e1dab38b059" />
+<img width="1365" height="632" alt="Screenshot 2026-04-15 154146" src="https://github.com/user-attachments/assets/76eb94c2-9546-48be-b5de-0aa197052d02" />
+<img width="1365" height="629" alt="Screenshot 2026-04-15 154248" src="https://github.com/user-attachments/assets/cf293108-2967-473a-8002-0bff0fd89e2b" />
 
-**Proposal Modal**  
-_Add a screenshot of the proposal details modal showing PQC verification, approvals, signature audit log, and action buttons._
 
-**Execution Trace**  
-_Add a screenshot of a successfully executed proposal with the transaction hash, Etherscan link, and execution timeline._
+
+
 
 ## 14. Future Improvements
 - MetaMask-only execution so the admin wallet, not the backend relayer, pays gas.
