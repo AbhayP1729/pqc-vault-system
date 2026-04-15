@@ -1,4 +1,4 @@
-const steps = ['Proposed', 'Signed', 'Approved', 'Executed']
+const steps = ['PQC Verified', 'Approval Threshold Met', 'Transaction Sent', 'Confirmed on Blockchain']
 
 type ExecutionTimelineProps = {
   currentStep: number
@@ -13,7 +13,7 @@ export function ExecutionTimeline({ currentStep }: ExecutionTimelineProps) {
           <div className="relative grid grid-cols-4 gap-4">
             {steps.map((step, index) => {
               const isComplete = index < currentStep
-              const isCurrent = index === currentStep
+              const isCurrent = index === currentStep && currentStep < steps.length
 
               return (
                 <div key={step} className="flex flex-col items-center text-center">

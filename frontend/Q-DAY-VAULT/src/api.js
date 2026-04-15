@@ -5,7 +5,7 @@ export const API_BASE_URL = 'http://localhost:8000'
 
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 10000,
+  timeout: 120000,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -91,6 +91,48 @@ export function approveProposal(data) {
   )
 }
 
+export function verifySignature(data) {
+  return request(
+    {
+      method: 'post',
+      url: '/verify-signature',
+      data,
+    },
+    'Unable to verify signature.',
+  )
+}
+
+export function getVaults() {
+  return request(
+    {
+      method: 'get',
+      url: '/vaults',
+    },
+    'Unable to load vaults.',
+  )
+}
+
+export function getPqcAlgorithms() {
+  return request(
+    {
+      method: 'get',
+      url: '/pqc/algorithms',
+    },
+    'Unable to load PQC algorithms.',
+  )
+}
+
+export function registerWalletPqcAlgorithms(data) {
+  return request(
+    {
+      method: 'post',
+      url: '/pqc/register-wallet',
+      data,
+    },
+    'Unable to register PQC algorithms for this wallet.',
+  )
+}
+
 export function getProposals(params = {}) {
   return request(
     {
@@ -102,13 +144,14 @@ export function getProposals(params = {}) {
   )
 }
 
-export function executeProposal(id) {
+export function executeProposal(id, executorWalletAddress) {
   return request(
     {
       method: 'post',
       url: '/execute',
       data: {
         proposal_id: id,
+        executor_wallet_address: executorWalletAddress,
       },
     },
     'Unable to execute proposal.',

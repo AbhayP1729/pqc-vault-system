@@ -23,7 +23,7 @@ describe("MultiAdminVault", function () {
   });
 
   it("creates proposals, tracks approvals, and executes after threshold", async function () {
-    const [admin1, admin2, admin3, recipient] = await ethers.getSigners();
+    const [relayer, admin1, admin2, admin3, recipient] = await ethers.getSigners();
     const vault = await ethers.deployContract(
       "MultiAdminVault",
       [[admin1.address, admin2.address, admin3.address], 2n],
@@ -32,28 +32,28 @@ describe("MultiAdminVault", function () {
 
     const sendValue = ethers.parseEther("0.25");
     const proposalTx = await vault
-      .connect(admin1)
-      .createProposal(recipient.address, sendValue, "0x", "Treasury payout");
+      .connect(relayer)
+      .createProposal(admin1.address, recipient.address, sendValue, "0x", "Treasury payout");
     await expect(proposalTx)
       .to.emit(vault, "ProposalCreated")
       .withArgs(0n, admin1.address, recipient.address, sendValue, "0x", "Treasury payout");
 
-    await expect(vault.connect(admin1).approveProposal(0))
+    await expect(vault.connect(relayer).approveProposal(0, admin1.address))
       .to.emit(vault, "ProposalApproved")
       .withArgs(0n, admin1.address, 1n, 2n);
 
-    await expect(vault.connect(admin1).executeProposal(0)).to.be.revertedWithCustomError(
+    await expect(vault.connect(relayer).executeProposal(0, admin1.address)).to.be.revertedWithCustomError(
       vault,
       "InsufficientApprovals",
     );
 
     const recipientBalanceBefore = await ethers.provider.getBalance(recipient.address);
 
-    await expect(vault.connect(admin2).approveProposal(0))
+    await expect(vault.connect(relayer).approveProposal(0, admin2.address))
       .to.emit(vault, "ProposalApproved")
       .withArgs(0n, admin2.address, 2n, 2n);
 
-    await expect(vault.connect(admin3).executeProposal(0))
+    await expect(vault.connect(relayer).executeProposal(0, admin3.address))
       .to.emit(vault, "ProposalExecuted")
       .withArgs(0n, admin3.address, recipient.address, sendValue, "0x");
 
@@ -66,16 +66,16 @@ describe("MultiAdminVault", function () {
   });
 
   it("prevents duplicate approvals from the same admin", async function () {
-    const [admin1, admin2] = await ethers.getSigners();
+    const [relayer, admin1, admin2] = await ethers.getSigners();
     const vault = await ethers.deployContract("MultiAdminVault", [
       [admin1.address, admin2.address],
       2n,
     ]);
 
-    await vault.connect(admin1).createProposal(admin2.address, 0n, "0x", "No-op");
-    await vault.connect(admin1).approveProposal(0);
+    await vault.connect(relayer).createProposal(admin1.address, admin2.address, 0n, "0x", "No-op");
+    await vault.connect(relayer).approveProposal(0, admin1.address);
 
-    await expect(vault.connect(admin1).approveProposal(0)).to.be.revertedWithCustomError(
+    await expect(vault.connect(relayer).approveProposal(0, admin1.address)).to.be.revertedWithCustomError(
       vault,
       "ProposalAlreadyApproved",
     );

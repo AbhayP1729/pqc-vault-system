@@ -166,9 +166,65 @@ def send_transaction(
     )
 
 
+def deploy_vault_contract(
+    admin_addresses: list[str],
+    threshold: int,
+    network: str = "sepolia",
+) -> dict[str, Any]:
+    return run_ethers_action(
+        "deployVault",
+        {
+            "admins": admin_addresses,
+            "threshold": threshold,
+            "network": network,
+        },
+    )
+
+
+def create_contract_proposal(
+    contract_address: str,
+    proposer_wallet_address: str,
+    target: str,
+    value_wei: str | int,
+    description: str,
+    data: str = "0x",
+    network: str = "sepolia",
+) -> dict[str, Any]:
+    return run_ethers_action(
+        "createContractProposal",
+        {
+            "contractAddress": contract_address,
+            "proposer": proposer_wallet_address,
+            "target": target,
+            "value": str(value_wei),
+            "data": data,
+            "description": description,
+            "network": network,
+        },
+    )
+
+
+def approve_contract_proposal(
+    contract_address: str,
+    proposal_id: int,
+    admin_wallet_address: str,
+    network: str = "sepolia",
+) -> dict[str, Any]:
+    return run_ethers_action(
+        "approveContractProposal",
+        {
+            "contractAddress": contract_address,
+            "proposalId": proposal_id,
+            "admin": admin_wallet_address,
+            "network": network,
+        },
+    )
+
+
 def execute_contract_proposal(
     contract_address: str,
     proposal_id: int,
+    executor_wallet_address: str,
     network: str = "sepolia",
 ) -> dict[str, Any]:
     return run_ethers_action(
@@ -176,6 +232,7 @@ def execute_contract_proposal(
         {
             "contractAddress": contract_address,
             "proposalId": proposal_id,
+            "executor": executor_wallet_address,
             "network": network,
         },
     )

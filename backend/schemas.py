@@ -4,12 +4,13 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
-from pqc.dilithium import DEFAULT_ALGORITHM
+from pqc import DEFAULT_ALGORITHM, normalize_algorithm
 
 
 class AdminInput(BaseModel):
     name: str = Field(min_length=1)
     public_key: str | None = None
+    wallet_address: str | None = None
     generate_keypair: bool = False
     algorithm: str = DEFAULT_ALGORITHM
 
@@ -19,6 +20,7 @@ class AdminInput(BaseModel):
             raise ValueError("Provide either public_key or generate_keypair, not both.")
         if not self.generate_keypair and not self.public_key:
             raise ValueError("Each admin needs a public_key or generate_keypair=true.")
+        self.algorithm = normalize_algorithm(self.algorithm)
         return self
 
 
@@ -43,6 +45,7 @@ class CreateProposalRequest(BaseModel):
     destination: str = Field(min_length=1)
     amount_eth: str = Field(min_length=1)
     payload: dict[str, Any] | None = None
+    proposer_wallet_address: str | None = None
     onchain_proposal_id: int | None = Field(default=None, ge=0)
 
 
@@ -58,6 +61,7 @@ class SignProposalRequest(BaseModel):
     def validate_signing_material(self) -> "SignProposalRequest":
         if self.signature and self.private_key:
             raise ValueError("Provide at most one of signature or private_key.")
+        self.algorithm = normalize_algorithm(self.algorithm)
         return self
 
 
@@ -74,14 +78,21 @@ class VerifySignatureRequest(BaseModel):
         has_proposal_id = self.proposal_id is not None
         if has_message == has_proposal_id:
             raise ValueError("Provide exactly one of message or proposal_id.")
+        self.algorithm = normalize_algorithm(self.algorithm)
         return self
 
 
 class ExecuteProposalRequest(BaseModel):
     proposal_id: int = Field(gt=0)
+    executor_wallet_address: str | None = None
 
 
 class ApproveProposalRequest(BaseModel):
     proposal_id: int = Field(gt=0)
     admin_public_key: str = Field(min_length=1)
     approver_wallet_address: str | None = None
+
+
+class RegisterWalletAlgorithmsRequest(BaseModel):
+    vault_id: int = Field(gt=0)
+    wallet_address: str = Field(min_length=1)

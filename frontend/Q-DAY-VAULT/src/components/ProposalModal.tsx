@@ -5,7 +5,7 @@ import { SignatureIndicator } from './SignatureIndicator'
 
 import { formatWalletAddress } from '../lib/wallet'
 
-import type { Proposal, SignatureState } from '../types'
+import type { BackendDebugEntry, Proposal, PqcAlgorithmOption, SignatureState } from '../types'
 
 type ProposalNotice = {
   tone: 'success' | 'error' | 'info'
@@ -14,23 +14,36 @@ type ProposalNotice = {
 }
 
 type ProposalModalProps = {
-  proposal: Proposal | null
+  proposal: Proposal
   vaultName: string
   explorerUrl: string | null
+  currentWalletAddress: string | null
+  selectedAlgorithmLabel: string
+  isSelectedAlgorithmAvailable: boolean
   onClose: () => void
   onSign: () => void
   onApprove: () => void
+  onRegisterAllAlgorithms: () => void
   onExecute: () => void
   signLoading: boolean
   approveLoading: boolean
+  registerAllLoading: boolean
   executeLoading: boolean
   signDisabled: boolean
   approveDisabled: boolean
+  registerAllDisabled: boolean
   executeDisabled: boolean
   signLabel: string
   approveLabel: string
   executeLabel: string
   currentWalletSignatureState: SignatureState
+  pqcAlgorithms: PqcAlgorithmOption[]
+  availablePqcAlgorithms: PqcAlgorithmOption[]
+  selectedPqcAlgorithm: string
+  onSelectPqcAlgorithm: (algorithm: string) => void
+  debugEntries: BackendDebugEntry[]
+  isDebugVisible: boolean
+  onToggleDebug: () => void
   notice: ProposalNotice | null
 }
 
@@ -81,6 +94,36 @@ function formatApprover(value: string | null | undefined, fallback: string) {
   return fallback
 }
 
+function shortenValue(value: string | null | undefined, lead = 14, tail = 12) {
+  if (!value) {
+    return 'Unavailable'
+  }
+
+  if (value.length <= lead + tail + 3) {
+    return value
+  }
+
+  return `${value.slice(0, lead)}...${value.slice(-tail)}`
+}
+
+function formatAuditTime(value: string | null | undefined) {
+  if (!value) {
+    return 'Pending'
+  }
+
+  const timestamp = new Date(value)
+  if (Number.isNaN(timestamp.getTime())) {
+    return value
+  }
+
+  return timestamp.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
 function getWalletSignatureLabel(state: SignatureState) {
   if (state === 'verified') {
     return 'Signature Verified'
@@ -97,29 +140,66 @@ export function ProposalModal({
   proposal,
   vaultName,
   explorerUrl,
+  currentWalletAddress,
+  selectedAlgorithmLabel,
+  isSelectedAlgorithmAvailable,
   onClose,
   onSign,
   onApprove,
+  onRegisterAllAlgorithms,
   onExecute,
   signLoading,
   approveLoading,
+  registerAllLoading,
   executeLoading,
   signDisabled,
   approveDisabled,
+  registerAllDisabled,
   executeDisabled,
   signLabel,
   approveLabel,
   executeLabel,
   currentWalletSignatureState,
+  pqcAlgorithms,
+  availablePqcAlgorithms,
+  selectedPqcAlgorithm,
+  onSelectPqcAlgorithm,
+  debugEntries,
+  isDebugVisible,
+  onToggleDebug,
   notice,
 }: ProposalModalProps) {
-  if (!proposal) {
-    return null
-  }
+  const algorithmOptions = pqcAlgorithms.length > 0 ? pqcAlgorithms : availablePqcAlgorithms
+  const normalizedCurrentWalletAddress = currentWalletAddress?.toLowerCase() ?? null
+  const currentWalletAudit = normalizedCurrentWalletAddress
+    ? proposal.signatureAuditLog.find(
+        (audit) => audit.walletAddress?.toLowerCase() === normalizedCurrentWalletAddress,
+      ) ?? null
+    : null
+  const currentWalletSignature = normalizedCurrentWalletAddress
+    ? proposal.signatures.find(
+        (signature) => signature.walletAddress?.toLowerCase() === normalizedCurrentWalletAddress,
+      ) ?? null
+    : null
+  const displayedAlgorithm =
+    currentWalletSignature?.algorithm ?? currentWalletAudit?.algorithm ?? selectedAlgorithmLabel
+  const latestSignature = currentWalletSignature?.signature ?? currentWalletAudit?.signature ?? null
+  const verificationResult = currentWalletSignature
+    ? currentWalletSignature.isVerified
+      ? 'Valid'
+      : 'Invalid'
+    : currentWalletAudit?.verificationResult ?? (currentWalletSignatureState === 'verified' ? 'Valid' : 'Pending')
+  const verificationTimestamp = currentWalletAudit?.createdAt ?? currentWalletSignature?.createdAt ?? null
+  const keyStatus = currentWalletSignature || currentWalletAudit
+    ? (currentWalletSignature?.keyGenerated ?? currentWalletAudit?.keyGenerated)
+      ? 'New key generated'
+      : 'Existing key used'
+    : 'Waiting to sign'
+  const executionStep = executeLoading ? Math.max(proposal.currentStep, 3) : proposal.currentStep
 
   return (
     <ModalFrame
-      isOpen={Boolean(proposal)}
+      isOpen
       onClose={onClose}
       title={proposal.title}
       description={proposal.description || undefined}
@@ -130,6 +210,17 @@ export function ProposalModal({
           <InfoCard label="Destination" value={proposal.destination} mono />
           <InfoCard label="Amount" value={`${proposal.amountEth} ETH`} />
           <InfoCard label="Vault" value={vaultName} />
+          <InfoCard
+            label="Connected wallet"
+            value={currentWalletAddress ? formatWalletAddress(currentWalletAddress) : 'Not connected'}
+            mono
+          />
+          {proposal.contractAddress ? (
+            <InfoCard label="Vault contract" value={proposal.contractAddress} mono />
+          ) : null}
+          {proposal.onchainProposalId !== null && proposal.onchainProposalId !== undefined ? (
+            <InfoCard label="Onchain proposal" value={String(proposal.onchainProposalId)} />
+          ) : null}
           <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-slate-800/80">
             <div className="flex items-center justify-between gap-3">
               <div>
@@ -151,11 +242,77 @@ export function ProposalModal({
         ) : null}
 
         <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400">PQC verification</h3>
+              <p className="mt-1 text-sm text-gray-900 dark:text-gray-100">
+                {verificationResult === 'Valid' ? 'Valid signature bound to this proposal.' : 'Awaiting a verified signature.'}
+              </p>
+            </div>
+            <label className="min-w-56">
+              <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Signing algorithm</span>
+              <select
+                value={selectedPqcAlgorithm}
+                onChange={(event) => onSelectPqcAlgorithm(event.target.value)}
+                disabled={signLoading || signDisabled || proposal.status !== 'pending'}
+                className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none transition duration-200 focus:border-blue-400 disabled:cursor-not-allowed disabled:bg-gray-100 dark:border-gray-700 dark:bg-gray-900 dark:focus:border-cyan-400 dark:disabled:bg-slate-800"
+              >
+                {algorithmOptions.map((algorithm) => (
+                  <option key={algorithm.name} value={algorithm.name}>
+                    {algorithm.label}
+                  </option>
+                ))}
+              </select>
+              {availablePqcAlgorithms.length === 0 && proposal.status === 'pending' ? (
+                <p className="mt-1 text-xs text-amber-600 dark:text-amber-300">
+                  Register this wallet as a vault admin to sign.
+                </p>
+              ) : !isSelectedAlgorithmAvailable && proposal.status === 'pending' ? (
+                <p className="mt-1 text-xs text-amber-600 dark:text-amber-300">
+                  This wallet is not registered as a vault admin.
+                </p>
+              ) : null}
+            </label>
+          </div>
+
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <InfoCard label="Algorithm" value={displayedAlgorithm} />
+            <InfoCard label="Key status" value={keyStatus} />
+            <InfoCard label="Verification result" value={verificationResult} />
+            <InfoCard label="Signature" value={shortenValue(latestSignature)} mono />
+            <InfoCard label="Timestamp" value={formatAuditTime(verificationTimestamp)} />
+          </div>
+
+          <div className="mt-3 flex justify-end">
+            <button
+              type="button"
+              onClick={onRegisterAllAlgorithms}
+              disabled={registerAllDisabled}
+              className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition duration-200 ${
+                registerAllDisabled && !registerAllLoading
+                  ? 'cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400 dark:border-gray-700 dark:bg-slate-800 dark:text-gray-500'
+                  : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-slate-800'
+              }`}
+            >
+              {registerAllLoading ? <LoadingSpinner className="h-4 w-4" /> : null}
+              Register all PQC algorithms
+            </button>
+          </div>
+
+          <div className="mt-3 rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-slate-800/80">
+            <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Message being signed</p>
+            <p className="mt-2 max-h-32 overflow-auto break-all font-mono text-xs leading-5 text-gray-800 dark:text-gray-200">
+              {currentWalletAudit?.message ?? proposal.messageToSign ?? 'Message unavailable'}
+            </p>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400">Proposal pipeline</h3>
               <p className="mt-1 text-sm text-gray-900 dark:text-gray-100">
-                Proposed to executed, with signing and approvals separated.
+                PQC verification, threshold approval, vault contract execution, blockchain confirmation.
               </p>
             </div>
             <span className="rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-700 dark:bg-slate-800 dark:text-gray-300">
@@ -163,7 +320,7 @@ export function ProposalModal({
             </span>
           </div>
 
-          <ExecutionTimeline currentStep={proposal.currentStep} />
+          <ExecutionTimeline currentStep={executionStep} />
 
           <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-slate-800/80">
             <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Your signature</p>
@@ -201,6 +358,103 @@ export function ProposalModal({
               <p className="text-sm text-gray-500 dark:text-gray-400">No approvals recorded yet.</p>
             )}
           </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400">Signature audit log</h3>
+              <p className="mt-1 text-sm text-gray-900 dark:text-gray-100">
+                {proposal.signatureAuditLog.length} verification event{proposal.signatureAuditLog.length === 1 ? '' : 's'}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-3 space-y-2">
+            {proposal.signatureAuditLog.length > 0 ? (
+              proposal.signatureAuditLog.slice(0, 4).map((audit) => (
+                <div
+                  key={audit.id}
+                  className="rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-slate-800/80"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="font-mono text-xs text-gray-900 dark:text-gray-100" title={audit.walletAddress ?? undefined}>
+                      {formatApprover(audit.walletAddress, 'PQC admin')}
+                    </p>
+                    <span
+                      className={`rounded-full border px-2 py-1 text-xs font-medium ${
+                        audit.isVerified
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/20 dark:text-emerald-300'
+                          : 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/20 dark:text-rose-300'
+                      }`}
+                    >
+                      {audit.verificationResult}
+                    </span>
+                  </div>
+                  <div className="mt-2 grid gap-2 text-xs text-gray-500 dark:text-gray-400 sm:grid-cols-3">
+                    <span>{audit.algorithm}</span>
+                    <span className="font-mono" title={audit.signature}>
+                      {shortenValue(audit.signature, 10, 8)}
+                    </span>
+                    <span>{formatAuditTime(audit.createdAt)}</span>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="text-sm text-gray-500 dark:text-gray-400">No PQC verification events yet.</p>
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+          <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400">
+            Classical vs Quantum-Safe Execution
+          </h3>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 dark:border-rose-900/60 dark:bg-rose-950/20">
+              <p className="text-sm font-semibold text-rose-800 dark:text-rose-300">Without PQC</p>
+              <p className="mt-1 text-sm text-rose-700 dark:text-rose-200">
+                One classical wallet signature can authorize execution.
+              </p>
+            </div>
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-900/60 dark:bg-emerald-950/20">
+              <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-300">With PQC</p>
+              <p className="mt-1 text-sm text-emerald-700 dark:text-emerald-200">
+                PQC verification and distinct admin wallets gate the Sepolia transaction.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+          <button
+            type="button"
+            onClick={onToggleDebug}
+            className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 transition duration-200 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-slate-800"
+          >
+            {isDebugVisible ? 'Hide backend debug' : 'Show backend debug'}
+          </button>
+          {isDebugVisible ? (
+            <div className="mt-3 space-y-3">
+              {debugEntries.length > 0 ? (
+                debugEntries.map((entry) => (
+                  <div key={`${entry.label}-${entry.createdAt}`} className="rounded-xl bg-gray-950 p-3 text-xs text-gray-100">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <span className="font-medium">{entry.label}</span>
+                      <span className="text-gray-400">{entry.createdAt}</span>
+                    </div>
+                    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all">
+                      {JSON.stringify(entry.payload, null, 2)}
+                    </pre>
+                  </div>
+                ))
+              ) : (
+                <p className="text-sm text-gray-500 dark:text-gray-400">
+                  Sign, approve, or execute this proposal to capture the backend response.
+                </p>
+              )}
+            </div>
+          ) : null}
         </div>
 
         {proposal.executionTxHash ? (

@@ -24,6 +24,7 @@ SCHEMA = (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         vault_id INTEGER NOT NULL,
         admin_name TEXT NOT NULL,
+        wallet_address TEXT,
         public_key TEXT NOT NULL,
         algorithm TEXT NOT NULL,
         key_file TEXT,
@@ -59,6 +60,8 @@ SCHEMA = (
         admin_id INTEGER NOT NULL,
         signature TEXT NOT NULL,
         is_verified INTEGER NOT NULL CHECK (is_verified IN (0, 1)),
+        public_key TEXT,
+        algorithm TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY (proposal_id) REFERENCES proposals (id) ON DELETE CASCADE,
         FOREIGN KEY (admin_id) REFERENCES vault_admins (id) ON DELETE CASCADE,
@@ -72,11 +75,31 @@ SCHEMA = (
         admin_id INTEGER NOT NULL,
         signature TEXT NOT NULL,
         is_verified INTEGER NOT NULL CHECK (is_verified IN (0, 1)),
+        public_key TEXT,
+        algorithm TEXT,
+        key_generated INTEGER NOT NULL DEFAULT 0 CHECK (key_generated IN (0, 1)),
         signer_wallet_address TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY (proposal_id) REFERENCES proposals (id) ON DELETE CASCADE,
         FOREIGN KEY (admin_id) REFERENCES vault_admins (id) ON DELETE CASCADE,
         UNIQUE (proposal_id, admin_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS signature_audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        proposal_id INTEGER NOT NULL,
+        admin_id INTEGER,
+        wallet_address TEXT,
+        algorithm TEXT NOT NULL,
+        public_key TEXT,
+        key_generated INTEGER NOT NULL DEFAULT 0 CHECK (key_generated IN (0, 1)),
+        signature TEXT NOT NULL,
+        is_verified INTEGER NOT NULL CHECK (is_verified IN (0, 1)),
+        message TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (proposal_id) REFERENCES proposals (id) ON DELETE CASCADE,
+        FOREIGN KEY (admin_id) REFERENCES vault_admins (id) ON DELETE SET NULL
     )
     """,
 )
@@ -189,6 +212,72 @@ def _backfill_signatures_from_legacy_approvals(connection: sqlite3.Connection) -
     )
 
 
+def _backfill_signature_metadata(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        UPDATE proposal_signatures
+        SET public_key = (
+                SELECT vault_admins.public_key
+                FROM vault_admins
+                WHERE vault_admins.id = proposal_signatures.admin_id
+            )
+        WHERE public_key IS NULL OR TRIM(public_key) = ''
+        """
+    )
+    connection.execute(
+        """
+        UPDATE proposal_signatures
+        SET algorithm = (
+                SELECT vault_admins.algorithm
+                FROM vault_admins
+                WHERE vault_admins.id = proposal_signatures.admin_id
+            )
+        WHERE algorithm IS NULL OR TRIM(algorithm) = ''
+        """
+    )
+    connection.execute(
+        "UPDATE proposal_signatures SET key_generated = 0 WHERE key_generated IS NULL"
+    )
+
+    connection.execute(
+        """
+        UPDATE approvals
+        SET public_key = (
+                SELECT vault_admins.public_key
+                FROM vault_admins
+                WHERE vault_admins.id = approvals.admin_id
+            )
+        WHERE public_key IS NULL OR TRIM(public_key) = ''
+        """
+    )
+    connection.execute(
+        """
+        UPDATE approvals
+        SET algorithm = (
+                SELECT vault_admins.algorithm
+                FROM vault_admins
+                WHERE vault_admins.id = approvals.admin_id
+            )
+        WHERE algorithm IS NULL OR TRIM(algorithm) = ''
+        """
+    )
+
+    connection.execute(
+        """
+        UPDATE signature_audit_log
+        SET public_key = (
+                SELECT vault_admins.public_key
+                FROM vault_admins
+                WHERE vault_admins.id = signature_audit_log.admin_id
+            )
+        WHERE public_key IS NULL OR TRIM(public_key) = ''
+        """
+    )
+    connection.execute(
+        "UPDATE signature_audit_log SET key_generated = 0 WHERE key_generated IS NULL"
+    )
+
+
 def get_connection() -> sqlite3.Connection:
     connection = sqlite3.connect(DATABASE_PATH)
     connection.row_factory = sqlite3.Row
@@ -204,6 +293,7 @@ def init_db() -> None:
 
         _ensure_column(connection, "vaults", "contract_address", "TEXT")
         _ensure_column(connection, "vaults", "network", "TEXT NOT NULL DEFAULT 'sepolia'")
+        _ensure_column(connection, "vault_admins", "wallet_address", "TEXT")
         _ensure_column(connection, "vault_admins", "key_file", "TEXT")
         _ensure_column(connection, "proposals", "destination", "TEXT")
         _ensure_column(connection, "proposals", "amount_eth", "TEXT")
@@ -211,6 +301,24 @@ def init_db() -> None:
         _ensure_column(connection, "proposals", "message_version", "INTEGER NOT NULL DEFAULT 1")
         _ensure_column(connection, "proposals", "onchain_proposal_id", "INTEGER")
         _ensure_column(connection, "approvals", "approver_wallet_address", "TEXT")
+        _ensure_column(connection, "approvals", "public_key", "TEXT")
+        _ensure_column(connection, "approvals", "algorithm", "TEXT")
+        _ensure_column(connection, "proposal_signatures", "public_key", "TEXT")
+        _ensure_column(connection, "proposal_signatures", "algorithm", "TEXT")
+        _ensure_column(
+            connection,
+            "proposal_signatures",
+            "key_generated",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (key_generated IN (0, 1))",
+        )
         _ensure_column(connection, "proposal_signatures", "signer_wallet_address", "TEXT")
+        _ensure_column(connection, "signature_audit_log", "public_key", "TEXT")
+        _ensure_column(
+            connection,
+            "signature_audit_log",
+            "key_generated",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (key_generated IN (0, 1))",
+        )
         _backfill_proposal_transaction_fields(connection)
         _backfill_signatures_from_legacy_approvals(connection)
+        _backfill_signature_metadata(connection)

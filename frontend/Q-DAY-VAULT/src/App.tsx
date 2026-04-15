@@ -6,49 +6,57 @@ import {
   createProposal,
   createVault,
   executeProposal,
+  getPqcAlgorithms,
   getProposals,
+  getVaults,
+  registerWalletPqcAlgorithms,
   signProposal,
   useApiRequest,
 } from './api.js'
 import { initialActivity, initialProposals, initialVaults, navItems } from './data'
+import { CreateVaultModal } from './components/CreateVaultModal'
 import { LoadingSpinner } from './components/LoadingSpinner'
 import { ProposalCard } from './components/ProposalCard'
+import { ProposalFlowModal } from './components/ProposalFlowModal'
 import { ProposalModal } from './components/ProposalModal'
-import { Sidebar } from './components/Sidebar'
 import { ThemeToggle } from './components/ThemeToggle'
 import { ToastViewport } from './components/ToastViewport'
 import { VaultCard } from './components/VaultCard'
-import { validateProposalTransaction } from './lib/ethereum'
+import { useWallet } from './context/WalletContext'
 import {
-  SEPOLIA_CHAIN_ID,
+  getEthBalance,
+  normalizeEthereumAddress,
+  normalizeEthereumAddressList,
+  validateProposalTransaction,
+} from './lib/ethereum'
+import {
   SEPOLIA_NETWORK_NAME,
-  clearWalletSession,
   formatWalletAddress,
-  getEthereumProvider,
   getWalletErrorMessage,
-  isSepoliaChainId,
-  persistWalletSession,
-  readWalletSession,
-  resolveChainId,
-  resolvePrimaryAccount,
 } from './lib/wallet'
 import { applyTheme, resolveInitialTheme } from './theme'
 
 import type {
   ApiApproveProposalResponse,
-  ApiExecuteProposalResponse,
   ApiCreateVaultResponse,
+  ApiExecuteProposalResponse,
   ApiGeneratedAdminKey,
   ApiPayload,
   ApiProposalResponse,
+  ApiRegisterWalletPqcResponse,
+  ApiVaultAdmin,
+  ApiVaultResponse,
 } from './api.js'
-import type { FormEvent } from 'react'
+import type { Eip1193Provider } from 'ethers'
+import type { FormEvent, ReactNode } from 'react'
 import type {
   ActivityItem,
   AdminCredential,
+  BackendDebugEntry,
   NavItem,
   Proposal,
   ProposalStatus,
+  PqcAlgorithmOption,
   SignatureState,
   Theme,
   Vault,
@@ -67,12 +75,12 @@ type ProposalNotice = {
   message?: string
 }
 
-type WalletAction = 'connect' | 'switch' | null
-
 type VaultFormState = {
   name: string
   adminCount: string
   threshold: string
+  adminWallets: string
+  contractAddress: string
 }
 
 type ProposalFormState = {
@@ -81,12 +89,15 @@ type ProposalFormState = {
   description: string
   recipientAddress: string
   amountEth: string
+  onchainProposalId: string
 }
 
 const DEFAULT_VAULT_FORM: VaultFormState = {
   name: '',
   adminCount: '3',
   threshold: '2',
+  adminWallets: '',
+  contractAddress: '',
 }
 
 const DEFAULT_PROPOSAL_FORM: ProposalFormState = {
@@ -95,7 +106,34 @@ const DEFAULT_PROPOSAL_FORM: ProposalFormState = {
   description: '',
   recipientAddress: '',
   amountEth: '',
+  onchainProposalId: '',
 }
+
+const DEFAULT_PQC_ALGORITHMS: PqcAlgorithmOption[] = [
+  {
+    family: 'Dilithium',
+    name: 'Dilithium2',
+    label: 'Dilithium',
+  },
+  {
+    family: 'Falcon',
+    name: 'Falcon-512',
+    label: 'Falcon',
+  },
+  {
+    family: 'SPHINCS+',
+    name: 'SPHINCS+-SHA2-128f-simple',
+    label: 'SPHINCS+',
+  },
+]
+
+const PQC_ALGORITHM_LOOKUP = new Map(
+  DEFAULT_PQC_ALGORITHMS.flatMap((algorithm) => [
+    [algorithm.name.toLowerCase(), algorithm],
+    [algorithm.label.toLowerCase(), algorithm],
+    [algorithm.family.toLowerCase(), algorithm],
+  ]),
+)
 
 function createTempId(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`
@@ -143,14 +181,252 @@ function formatTimestamp(value?: string | null) {
   })
 }
 
+function parseBalanceValue(value: string | undefined) {
+  if (!value) {
+    return null
+  }
+
+  const normalized = value.replace(/eth/i, '').trim()
+  const parsed = Number(normalized)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function formatAggregateBalance(vaults: Vault[]) {
+  const balances = vaults
+    .map((vault) => parseBalanceValue(vault.balance))
+    .filter((value): value is number => value !== null)
+
+  if (balances.length === 0) {
+    return vaults.length > 0 ? 'Unavailable' : '0.0000 ETH'
+  }
+
+  return `${balances.reduce((sum, value) => sum + value, 0).toFixed(4)} ETH`
+}
+
+function getGreeting() {
+  const hour = new Date().getHours()
+  if (hour < 12) {
+    return 'Good morning'
+  }
+  if (hour < 17) {
+    return 'Good afternoon'
+  }
+  return 'Good evening'
+}
+
+function formatCompactWallet(value: string | null | undefined) {
+  if (!value) {
+    return 'Wallet disconnected'
+  }
+
+  return formatWalletAddress(value)
+}
+
+function AppMark() {
+  return (
+    <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-600 text-white shadow-md shadow-blue-600/20 dark:bg-blue-500">
+      <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="1.8">
+        <path d="M5 8.5 12 4l7 4.5v7L12 20l-7-4.5v-7Z" />
+        <path d="M12 4v16M5 8.5l7 4.5 7-4.5" />
+      </svg>
+    </div>
+  )
+}
+
+function VaultIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <path d="M4 7.5 12 4l8 3.5-8 3.5-8-3.5Z" />
+      <path d="M4 12l8 3.5 8-3.5" />
+      <path d="M4 16.5 12 20l8-3.5" />
+    </svg>
+  )
+}
+
+function ProposalIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <path d="M7 4.75h8l3 3v11.5a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V5.75a1 1 0 0 1 1-1Z" />
+      <path d="M10 10h4M9 14h6M9 18h4" />
+      <path d="M15 4.75v3h3" />
+    </svg>
+  )
+}
+
+function SignIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <path d="M5 18.5 18.5 5a2.12 2.12 0 0 1 3 3L8 21.5H5v-3Z" />
+      <path d="m14 6 4 4" />
+    </svg>
+  )
+}
+
+function ApproveIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <path d="M5 12.5 9.25 17 19 7.25" />
+      <path d="M4 4.75h16v14.5H4z" opacity=".45" />
+    </svg>
+  )
+}
+
+function ExecuteIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <path d="M5 12h11" />
+      <path d="m12 5 7 7-7 7" />
+      <path d="M5 5.75v12.5" opacity=".45" />
+    </svg>
+  )
+}
+
+function DashboardTab({
+  label,
+  active,
+  onClick,
+}: {
+  label: string
+  active: boolean
+  onClick: () => void
+}) {
+  return (
+    <motion.button
+      type="button"
+      whileTap={{ scale: 0.98 }}
+      onClick={onClick}
+      className={`rounded-2xl px-4 py-2.5 text-sm font-semibold transition duration-200 ${
+        active
+          ? 'bg-blue-600 text-white shadow-md shadow-blue-600/20 dark:bg-blue-500'
+          : 'bg-white text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:bg-slate-900 dark:text-gray-300 dark:hover:bg-slate-800 dark:hover:text-gray-100'
+      }`}
+    >
+      {label}
+    </motion.button>
+  )
+}
+
+function QuickActionCard({
+  icon,
+  title,
+  description,
+  meta,
+  onClick,
+  disabled = false,
+}: {
+  icon: ReactNode
+  title: string
+  description: string
+  meta: string
+  onClick: () => void
+  disabled?: boolean
+}) {
+  return (
+    <motion.button
+      type="button"
+      whileHover={disabled ? undefined : { y: -4, scale: 1.01 }}
+      whileTap={disabled ? undefined : { scale: 0.99 }}
+      onClick={onClick}
+      disabled={disabled}
+      className={`group rounded-2xl border p-6 text-left shadow-md transition duration-200 ${
+        disabled
+          ? 'cursor-not-allowed border-gray-200 bg-white/70 text-gray-400 dark:border-gray-800 dark:bg-slate-900/60 dark:text-gray-500'
+          : 'border-gray-200 bg-white text-gray-900 hover:border-blue-200 hover:shadow-lg dark:border-gray-700 dark:bg-slate-900/85 dark:text-gray-100 dark:hover:border-blue-500/40'
+      }`}
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div className={`flex h-12 w-12 items-center justify-center rounded-2xl ${disabled ? 'bg-gray-100 text-gray-400 dark:bg-slate-800 dark:text-gray-500' : 'bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-300'}`}>
+          {icon}
+        </div>
+        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${disabled ? 'bg-gray-100 text-gray-400 dark:bg-slate-800 dark:text-gray-500' : 'bg-gray-100 text-gray-600 dark:bg-slate-800 dark:text-gray-300'}`}>
+          {meta}
+        </span>
+      </div>
+      <h3 className="mt-5 text-lg font-semibold">{title}</h3>
+      <p className={`mt-2 text-sm leading-6 ${disabled ? 'text-gray-400 dark:text-gray-500' : 'text-gray-500 dark:text-gray-400'}`}>
+        {description}
+      </p>
+      <div className={`mt-5 inline-flex items-center gap-2 text-sm font-semibold ${disabled ? 'text-gray-400 dark:text-gray-500' : 'text-blue-600 dark:text-blue-300'}`}>
+        Open flow
+        <svg viewBox="0 0 24 24" className="h-4 w-4 transition duration-200 group-hover:translate-x-1" fill="none" stroke="currentColor" strokeWidth="1.8">
+          <path d="M5 12h13" />
+          <path d="m13 5 7 7-7 7" />
+        </svg>
+      </div>
+    </motion.button>
+  )
+}
+
+function WidgetShell({
+  title,
+  subtitle,
+  action,
+  children,
+  className = '',
+}: {
+  title: string
+  subtitle: string
+  action?: ReactNode
+  children: ReactNode
+  className?: string
+}) {
+  return (
+    <section className={`rounded-2xl border border-gray-200 bg-white p-6 shadow-md dark:border-gray-700 dark:bg-slate-900/85 ${className}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{title}</h2>
+          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{subtitle}</p>
+        </div>
+        {action}
+      </div>
+      <div className="mt-5">{children}</div>
+    </section>
+  )
+}
+
 function mapGeneratedAdminKey(key: ApiGeneratedAdminKey, fallbackIndex: number): AdminCredential {
   return {
     name: key.name ?? `Admin ${fallbackIndex + 1}`,
     publicKey: key.public_key ?? '',
-    privateKey: key.private_key ?? '',
+    privateKey: key.private_key,
     algorithm: key.algorithm ?? 'Dilithium2',
+    walletAddress: key.wallet_address ?? null,
     keyFile: key.key_file,
   }
+}
+
+function mapVaultAdmin(admin: ApiVaultAdmin, fallbackIndex: number): AdminCredential {
+  return {
+    name: admin.name ?? `Admin ${fallbackIndex + 1}`,
+    publicKey: admin.public_key ?? '',
+    algorithm: admin.algorithm ?? 'Dilithium2',
+    walletAddress: admin.wallet_address ?? null,
+    keyFile: admin.key_file ?? undefined,
+  }
+}
+
+function mapPqcAlgorithm(option: { family?: string; name?: string; label?: string }): PqcAlgorithmOption | null {
+  if (!option.name) {
+    return null
+  }
+
+  return {
+    family: option.family ?? option.label ?? option.name,
+    name: option.name,
+    label: option.label ?? option.family ?? option.name,
+  }
+}
+
+function mapPqcAlgorithmValue(option: string | { family?: string; name?: string; label?: string }) {
+  if (typeof option === 'string') {
+    return PQC_ALGORITHM_LOOKUP.get(option.trim().toLowerCase()) ?? null
+  }
+
+  return mapPqcAlgorithm(option)
+}
+
+function getAlgorithmSelectionKey(proposalId: string, walletAddress: string | null) {
+  return `${proposalId}:${walletAddress?.toLowerCase() ?? 'disconnected'}`
 }
 
 function deriveSignatureState(proposal: ApiProposalResponse): SignatureState {
@@ -186,7 +462,7 @@ function deriveCurrentStep(proposal: ApiProposalResponse) {
   )
 
   if (status === 'executed') {
-    return 3
+    return 4
   }
 
   if (status === 'approved') {
@@ -200,23 +476,44 @@ function deriveCurrentStep(proposal: ApiProposalResponse) {
   return 0
 }
 
-function mapApiVault(response: ApiCreateVaultResponse): Vault | null {
-  if (!response.vault?.id) {
+function mapApiVaultRecord(
+  vault: ApiVaultResponse | null | undefined,
+  generatedAdminKeys: ApiGeneratedAdminKey[] = [],
+): Vault | null {
+  if (!vault?.id) {
     return null
   }
 
+  const admins = (vault.admins ?? [])
+    .map((admin, index) => mapVaultAdmin(admin, index))
+    .filter((admin) => Boolean(admin.publicKey))
+  const generatedKeys = generatedAdminKeys
+    .map(mapGeneratedAdminKey)
+    .filter((admin) => Boolean(admin.publicKey))
+  const mergedAdmins = [
+    ...admins,
+    ...generatedKeys.filter(
+      (generatedKey) => !admins.some((admin) => admin.publicKey === generatedKey.publicKey),
+    ),
+  ]
+
   return {
-    id: `vault-${response.vault.id}`,
-    apiId: response.vault.id,
-    name: response.vault.name ?? `Vault ${response.vault.id}`,
-    balance: '$0.00',
-    adminCount: response.vault.admins?.length ?? response.generated_admin_keys?.length ?? 0,
-    network: response.vault.network ?? 'Backend tracked',
-    contractAddress: response.vault.contract_address,
+    id: `vault-${vault.id}`,
+    apiId: vault.id,
+    name: vault.name ?? `Vault ${vault.id}`,
+    balance: vault.contract_address ? 'Loading' : 'Deployment pending',
+    isActive: Boolean(vault.contract_address),
+    adminCount: vault.admins?.length ?? mergedAdmins.length,
+    network: vault.network ?? 'Backend tracked',
+    contractAddress: vault.contract_address,
     pendingApprovals: 0,
-    threshold: response.vault.threshold,
-    generatedAdminKeys: (response.generated_admin_keys ?? []).map(mapGeneratedAdminKey),
+    threshold: vault.threshold,
+    generatedAdminKeys: mergedAdmins,
   }
+}
+
+function mapApiVault(response: ApiCreateVaultResponse): Vault | null {
+  return mapApiVaultRecord(response.vault, response.generated_admin_keys ?? [])
 }
 
 function extractWalletIdentity(payload: ApiPayload | null | undefined) {
@@ -256,6 +553,7 @@ function mapApiProposal(proposal: ApiProposalResponse | null): Proposal | null {
     apiId: Number(proposal.id),
     vaultApiId: proposal.vault_id,
     network: proposal.network,
+    contractAddress: proposal.contract_address ?? null,
     title: proposal.title ?? 'Untitled proposal',
     description: proposal.description ?? 'No description provided.',
     destination: proposal.destination ?? 'Unavailable',
@@ -271,6 +569,9 @@ function mapApiProposal(proposal: ApiProposalResponse | null): Proposal | null {
     signatures: (proposal.signatures ?? [])
       .map((signature) => ({
         publicKey: signature.public_key ?? '',
+        algorithm: signature.algorithm,
+        signature: signature.signature,
+        keyGenerated: Boolean(signature.key_generated),
         walletAddress: signature.wallet_address ?? null,
         isVerified: signature.is_verified !== false,
         isApproved: Boolean(signature.is_approved),
@@ -281,10 +582,26 @@ function mapApiProposal(proposal: ApiProposalResponse | null): Proposal | null {
     approvalRecords: (proposal.approvals ?? [])
       .map((approval) => ({
         publicKey: approval.public_key ?? '',
+        algorithm: approval.algorithm,
+        signature: approval.signature,
         walletAddress: approval.wallet_address ?? null,
         createdAt: approval.created_at ?? null,
       }))
       .filter((approval) => Boolean(approval.publicKey)),
+    signatureAuditLog: (proposal.signature_audit_log ?? [])
+      .map((audit) => ({
+        id: String(audit.id ?? `${audit.public_key ?? 'audit'}-${audit.created_at ?? ''}`),
+        publicKey: audit.public_key ?? null,
+        walletAddress: audit.wallet_address ?? null,
+        algorithm: audit.algorithm ?? 'Dilithium2',
+        keyGenerated: Boolean(audit.key_generated),
+        signature: audit.signature ?? '',
+        message: audit.message ?? proposal.message_to_sign ?? '',
+        isVerified: audit.is_verified !== false,
+        verificationResult: audit.verification_result ?? (audit.is_verified === false ? 'Invalid' : 'Valid'),
+        createdAt: audit.created_at ?? null,
+      }))
+      .filter((audit) => Boolean(audit.signature || audit.message)),
     signaturePublicKeys: (proposal.signatures ?? [])
       .map((signature) => signature.public_key)
       .filter((value): value is string => Boolean(value)),
@@ -295,21 +612,24 @@ function mapApiProposal(proposal: ApiProposalResponse | null): Proposal | null {
       .map((approval) => approval.wallet_address)
       .filter((value): value is string => Boolean(value)),
     messageToSign: proposal.message_to_sign,
+    onchainProposalId: proposal.onchain_proposal_id ?? null,
     executionTxHash: proposal.execution_tx_hash,
   }
 }
 
 export default function App() {
-  const initialWalletSession = readWalletSession()
   const [theme, setTheme] = useState<Theme>(() => resolveInitialTheme())
   const [activeSection, setActiveSection] = useState<NavItem>('Dashboard')
   const [vaults, setVaults] = useState<Vault[]>(initialVaults)
   const [proposals, setProposals] = useState<Proposal[]>(initialProposals)
   const [activity, setActivity] = useState<ActivityItem[]>(initialActivity)
   const [selectedProposalId, setSelectedProposalId] = useState<string | null>(null)
-  const [walletAddress, setWalletAddress] = useState<string | null>(initialWalletSession.address)
-  const [walletChainId, setWalletChainId] = useState<string | null>(initialWalletSession.chainId)
-  const [walletActionLoading, setWalletActionLoading] = useState<WalletAction>(null)
+  const [pqcAlgorithms, setPqcAlgorithms] = useState<PqcAlgorithmOption[]>(DEFAULT_PQC_ALGORITHMS)
+  const [selectedPqcAlgorithms, setSelectedPqcAlgorithms] = useState<Record<string, string>>({})
+  const [backendDebugEntries, setBackendDebugEntries] = useState<Record<string, BackendDebugEntry[]>>({})
+  const [isBackendDebugVisible, setIsBackendDebugVisible] = useState(false)
+  const [isCreateVaultOpen, setIsCreateVaultOpen] = useState(false)
+  const [isProposalFlowOpen, setIsProposalFlowOpen] = useState(false)
   const [vaultForm, setVaultForm] = useState<VaultFormState>(DEFAULT_VAULT_FORM)
   const [proposalForm, setProposalForm] = useState<ProposalFormState>(DEFAULT_PROPOSAL_FORM)
   const [apiNotice, setApiNotice] = useState<string | null>(null)
@@ -319,34 +639,77 @@ export default function App() {
   const [approvingProposalId, setApprovingProposalId] = useState<string | null>(null)
   const [executingProposalId, setExecutingProposalId] = useState<string | null>(null)
   const toastTimeoutsRef = useRef<number[]>([])
+  const previousWalletStateRef = useRef<string | null>(null)
+
+  const {
+    ethereumProvider,
+    hasMetaMask,
+    walletAddress,
+    walletChainId,
+    walletEthBalance,
+    walletActionLoading,
+    isWalletConnected,
+    isOnSepolia,
+    walletIdentityLabel,
+    networkLabel,
+    connectWallet,
+    switchNetwork,
+  } = useWallet()
 
   const {
     run: loadProposals,
     loading: proposalsLoading,
     error: proposalsError,
   } = useApiRequest(getProposals)
+  const { run: loadVaults, loading: vaultsLoading } = useApiRequest(getVaults)
+  const { run: loadPqcAlgorithms } = useApiRequest(getPqcAlgorithms)
   const { run: runCreateVault, loading: createVaultLoading } = useApiRequest(createVault)
   const { run: runCreateProposal, loading: createProposalLoading } = useApiRequest(createProposal)
   const { run: runSignProposal, loading: signProposalLoading } = useApiRequest(signProposal)
   const { run: runApproveProposal, loading: approveProposalLoading } = useApiRequest(approveProposal)
+  const { run: runRegisterWalletPqcAlgorithms, loading: registerWalletPqcAlgorithmsLoading } =
+    useApiRequest(registerWalletPqcAlgorithms)
   const { run: runExecuteProposal, loading: executeProposalLoading } = useApiRequest(executeProposal)
-  const ethereumProvider = getEthereumProvider()
-  const hasMetaMask = Boolean(ethereumProvider)
-  const isWalletConnected = Boolean(walletAddress)
-  const isOnSepolia = isSepoliaChainId(walletChainId)
-  const walletIdentityLabel = formatWalletAddress(walletAddress)
-  const networkLabel = !hasMetaMask
-    ? 'MetaMask required'
-    : !walletAddress
-      ? 'Not connected'
-      : isOnSepolia
-        ? SEPOLIA_NETWORK_NAME
-        : 'Wrong network'
   const canUseWalletActions = isWalletConnected && isOnSepolia
 
   useEffect(() => {
     applyTheme(theme)
   }, [theme])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function hydratePqcAlgorithms() {
+      try {
+        const response = await loadPqcAlgorithms()
+        if (cancelled) {
+          return
+        }
+
+        const algorithmPayload =
+          response.algorithm_options && response.algorithm_options.length > 0
+            ? response.algorithm_options
+            : (response.algorithms ?? [])
+        const mappedAlgorithms = algorithmPayload
+          .map(mapPqcAlgorithmValue)
+          .filter((algorithm): algorithm is PqcAlgorithmOption => algorithm !== null)
+
+        if (mappedAlgorithms.length > 0) {
+          setPqcAlgorithms(mappedAlgorithms)
+        }
+      } catch {
+        if (!cancelled) {
+          setPqcAlgorithms(DEFAULT_PQC_ALGORITHMS)
+        }
+      }
+    }
+
+    void hydratePqcAlgorithms()
+
+    return () => {
+      cancelled = true
+    }
+  }, [loadPqcAlgorithms])
 
   useEffect(() => {
     const timeoutIds = toastTimeoutsRef.current
@@ -357,52 +720,83 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (!ethereumProvider) {
-      updateWalletSession(null, null)
+    console.log('[Wallet Debug] Current wallet address:', walletAddress ?? 'Not connected')
+  }, [walletAddress])
+
+  useEffect(() => {
+    const currentWalletState = `${walletAddress ?? 'disconnected'}:${walletChainId ?? 'no-chain'}`
+
+    if (previousWalletStateRef.current === null) {
+      previousWalletStateRef.current = currentWalletState
       return
     }
 
-    const provider = ethereumProvider
+    if (previousWalletStateRef.current === currentWalletState) {
+      return
+    }
 
+    previousWalletStateRef.current = currentWalletState
+    setSigningProposalId(null)
+    setApprovingProposalId(null)
+    setExecutingProposalId(null)
+    setProposalNotices({})
+
+    console.log('[Wallet Debug] Wallet context updated', {
+      walletAddress: walletAddress ?? 'Not connected',
+      chainId: walletChainId ?? 'Unavailable',
+    })
+  }, [walletAddress, walletChainId])
+
+  const vaultBalanceDependency = vaults
+    .map((vault) => `${vault.id}:${vault.contractAddress ?? ''}`)
+    .join('|')
+
+  useEffect(() => {
     let cancelled = false
 
-    async function syncWalletFromProvider() {
-      try {
-        const [accountsResult, chainIdResult] = await Promise.all([
-          provider.request({ method: 'eth_accounts' }),
-          provider.request({ method: 'eth_chainId' }),
-        ])
+    if (!ethereumProvider || !isOnSepolia) {
+      return
+    }
 
-        if (cancelled) {
-          return
-        }
+    const vaultsWithContracts = vaults.filter((vault) => vault.contractAddress)
+    if (vaultsWithContracts.length === 0) {
+      return
+    }
 
-        updateWalletSession(resolvePrimaryAccount(accountsResult), resolveChainId(chainIdResult))
-      } catch {
-        if (!cancelled) {
-          updateWalletSession(null, null)
-        }
+    async function hydrateVaultBalances() {
+      const balances = await Promise.all(
+        vaultsWithContracts.map(async (vault) => {
+          try {
+            const balance = await getEthBalance(
+              ethereumProvider as Eip1193Provider,
+              vault.contractAddress ?? '',
+            )
+            return [vault.id, `${Number(balance).toFixed(4)} ETH`] as const
+          } catch {
+            return [vault.id, 'Unavailable'] as const
+          }
+        }),
+      )
+
+      if (cancelled) {
+        return
       }
+
+      const balanceMap = new Map(balances)
+      setVaults((currentVaults) =>
+        currentVaults.map((vault) => {
+          const balance = balanceMap.get(vault.id)
+          return balance ? { ...vault, balance } : vault
+        }),
+      )
     }
 
-    function handleAccountsChanged() {
-      void syncWalletFromProvider()
-    }
-
-    function handleChainChanged() {
-      void syncWalletFromProvider()
-    }
-
-    void syncWalletFromProvider()
-    provider.on?.('accountsChanged', handleAccountsChanged)
-    provider.on?.('chainChanged', handleChainChanged)
+    void hydrateVaultBalances()
 
     return () => {
       cancelled = true
-      provider.removeListener?.('accountsChanged', handleAccountsChanged)
-      provider.removeListener?.('chainChanged', handleChainChanged)
     }
-  }, [ethereumProvider])
+  }, [ethereumProvider, isOnSepolia, vaultBalanceDependency])
 
   useEffect(() => {
     let cancelled = false
@@ -416,28 +810,50 @@ export default function App() {
       return
     }
 
-    async function hydrateProposals() {
+    async function hydrateLiveData() {
       try {
-        const response = await loadProposals()
+        const [vaultResponse, proposalResponse] = await Promise.all([loadVaults(), loadProposals()])
         if (cancelled) {
           return
         }
 
-        const mapped = response.proposals
+        const mappedProposals = proposalResponse.proposals
           .map((proposal) => mapApiProposal(proposal))
           .filter((proposal): proposal is Proposal => proposal !== null)
+        const pendingCounts = new Map<number, number>()
+        mappedProposals.forEach((proposal) => {
+          if (proposal.vaultApiId && proposal.status !== 'executed') {
+            pendingCounts.set(
+              proposal.vaultApiId,
+              (pendingCounts.get(proposal.vaultApiId) ?? 0) + (proposal.status === 'approved' ? 0 : 1),
+            )
+          }
+        })
+        const mappedVaults = (vaultResponse.vaults ?? [])
+          .map((vault) => mapApiVaultRecord(vault))
+          .filter((vault): vault is Vault => vault !== null)
+          .map((vault) => ({
+            ...vault,
+            pendingApprovals: vault.apiId ? pendingCounts.get(vault.apiId) ?? 0 : 0,
+          }))
 
         startTransition(() => {
-          if (mapped.length > 0) {
-            setProposals(mapped)
+          setVaults(mappedVaults)
+
+          if (mappedProposals.length > 0) {
+            setProposals(mappedProposals)
             setSelectedProposalId((currentId) =>
-              currentId && mapped.some((proposal) => proposal.id === currentId) ? currentId : null,
+              currentId && mappedProposals.some((proposal) => proposal.id === currentId) ? currentId : null,
             )
-            setApiNotice('Live proposals loaded from FastAPI.')
+            setApiNotice('Live vaults and proposals loaded from FastAPI.')
           } else {
             setProposals([])
             setSelectedProposalId(null)
-            setApiNotice('Backend is live, but there are no proposals yet.')
+            setApiNotice(
+              mappedVaults.length > 0
+                ? 'Vaults loaded from FastAPI. Create a proposal to start approvals.'
+                : 'Backend is live, but there are no vaults or proposals yet.',
+            )
           }
         })
       } catch {
@@ -447,12 +863,12 @@ export default function App() {
       }
     }
 
-    void hydrateProposals()
+    void hydrateLiveData()
 
     return () => {
       cancelled = true
     }
-  }, [canUseWalletActions, loadProposals, walletAddress])
+  }, [canUseWalletActions, loadProposals, loadVaults, walletAddress])
 
   function dismissToast(id: string) {
     setToasts((currentToasts) => currentToasts.filter((toast) => toast.id !== id))
@@ -478,21 +894,6 @@ export default function App() {
     toastTimeoutsRef.current.push(timeoutId)
   }
 
-  function updateWalletSession(nextAddress: string | null, nextChainId: string | null) {
-    setWalletAddress(nextAddress)
-    setWalletChainId(nextChainId)
-
-    if (nextAddress) {
-      persistWalletSession({
-        address: nextAddress,
-        chainId: nextChainId,
-      })
-      return
-    }
-
-    clearWalletSession()
-  }
-
   function setProposalNotice(proposalId: string, notice: ProposalNotice | null) {
     setProposalNotices((currentNotices) => {
       if (!notice) {
@@ -506,6 +907,38 @@ export default function App() {
         [proposalId]: notice,
       }
     })
+  }
+
+  function recordBackendDebugEntry(proposalId: string, label: string, payload: unknown) {
+    setBackendDebugEntries((currentEntries) => ({
+      ...currentEntries,
+      [proposalId]: [
+        {
+          label,
+          payload,
+          createdAt: new Date().toLocaleTimeString([], {
+            hour: 'numeric',
+            minute: '2-digit',
+            second: '2-digit',
+          }),
+        },
+        ...(currentEntries[proposalId] ?? []),
+      ].slice(0, 6),
+    }))
+  }
+
+  function updateVaultFormField(field: keyof VaultFormState, value: string) {
+    setVaultForm((currentForm) => ({
+      ...currentForm,
+      [field]: value,
+    }))
+  }
+
+  function updateProposalFormField(field: keyof ProposalFormState, value: string) {
+    setProposalForm((currentForm) => ({
+      ...currentForm,
+      [field]: value,
+    }))
   }
 
   function ensureWalletReady(actionLabel: string) {
@@ -566,12 +999,61 @@ export default function App() {
     )
   }
 
-  function getNextSignerForProposal(proposal: Proposal) {
+  function getAvailableAlgorithmsForProposal(
+    proposal: Proposal,
+    candidateWalletAddress: string | null,
+  ) {
     const vault = vaults.find((candidate) => candidate.apiId === proposal.vaultApiId)
     const adminKeys = vault?.generatedAdminKeys ?? []
-    const usedKeys = new Set(proposal.signaturePublicKeys ?? [])
+    const normalizedWalletAddress = candidateWalletAddress?.toLowerCase()
 
-    return adminKeys.find((admin) => !usedKeys.has(admin.publicKey))
+    if (!normalizedWalletAddress) {
+      return []
+    }
+
+    const hasMatchingAdmin = adminKeys.some(
+      (admin) => admin.walletAddress?.toLowerCase() === normalizedWalletAddress,
+    )
+
+    return hasMatchingAdmin ? pqcAlgorithms : []
+  }
+
+  function getSelectedAlgorithmForProposal(
+    proposal: Proposal,
+    candidateWalletAddress: string | null,
+  ) {
+    const walletSelectionKey = getAlgorithmSelectionKey(proposal.id, candidateWalletAddress)
+    const storedAlgorithm = selectedPqcAlgorithms[walletSelectionKey]
+    const availableAlgorithms = getAvailableAlgorithmsForProposal(proposal, candidateWalletAddress)
+
+    if (storedAlgorithm && pqcAlgorithms.some((algorithm) => algorithm.name === storedAlgorithm)) {
+      return storedAlgorithm
+    }
+
+    return availableAlgorithms[0]?.name ?? pqcAlgorithms[0]?.name ?? DEFAULT_PQC_ALGORITHMS[0].name
+  }
+
+  function getNextSignerForProposal(
+    proposal: Proposal,
+    candidateWalletAddress: string | null,
+  ) {
+    const vault = vaults.find((candidate) => candidate.apiId === proposal.vaultApiId)
+    const adminKeys = vault?.generatedAdminKeys ?? []
+    const normalizedWalletAddress = candidateWalletAddress?.toLowerCase()
+
+    if (!normalizedWalletAddress) {
+      return undefined
+    }
+
+    return adminKeys.find((admin) => {
+      if (!admin.publicKey) {
+        return false
+      }
+      if (!admin.walletAddress) {
+        return false
+      }
+      return admin.walletAddress.toLowerCase() === normalizedWalletAddress
+    })
   }
 
   function getSignatureForWallet(
@@ -616,33 +1098,19 @@ export default function App() {
     )
   }
 
+  function handleOpenProposal(proposal: Proposal) {
+    console.log('[Proposal Debug] Proposal clicked', {
+      id: proposal.id,
+      apiId: proposal.apiId,
+      walletAddress: walletAddress ?? 'Not connected',
+    })
+    setSelectedProposalId(proposal.id)
+  }
+
   async function handleConnectWallet() {
-    if (!ethereumProvider) {
-      pushToast({
-        title: 'MetaMask required',
-        message: 'Install or enable MetaMask to connect a wallet.',
-        tone: 'error',
-      })
-      return
-    }
-
-    const provider = ethereumProvider
-
-    setWalletActionLoading('connect')
-
     try {
-      const [accountsResult, chainIdResult] = await Promise.all([
-        provider.request({ method: 'eth_requestAccounts' }),
-        provider.request({ method: 'eth_chainId' }),
-      ])
-      const nextAddress = resolvePrimaryAccount(accountsResult)
-      const nextChainId = resolveChainId(chainIdResult)
+      const { address: nextAddress } = await connectWallet()
 
-      if (!nextAddress) {
-        throw new Error('MetaMask did not return an account.')
-      }
-
-      updateWalletSession(nextAddress, nextChainId)
       pushToast({
         title: 'Wallet connected',
         message: `${formatWalletAddress(nextAddress)} is now connected.`,
@@ -654,32 +1122,12 @@ export default function App() {
         message: getWalletErrorMessage(error, 'Unable to connect MetaMask.'),
         tone: 'error',
       })
-    } finally {
-      setWalletActionLoading(null)
     }
   }
 
   async function handleSwitchNetwork() {
-    if (!ethereumProvider) {
-      pushToast({
-        title: 'MetaMask required',
-        message: 'Install or enable MetaMask to switch networks.',
-        tone: 'error',
-      })
-      return
-    }
-
-    const provider = ethereumProvider
-
-    setWalletActionLoading('switch')
-
     try {
-      await provider.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: SEPOLIA_CHAIN_ID }],
-      })
-      const chainIdResult = await provider.request({ method: 'eth_chainId' })
-      updateWalletSession(walletAddress, resolveChainId(chainIdResult))
+      await switchNetwork()
       pushToast({
         title: 'Network switched',
         message: `MetaMask is now connected to ${SEPOLIA_NETWORK_NAME}.`,
@@ -691,8 +1139,6 @@ export default function App() {
         message: getWalletErrorMessage(error, `Unable to switch MetaMask to ${SEPOLIA_NETWORK_NAME}.`),
         tone: 'error',
       })
-    } finally {
-      setWalletActionLoading(null)
     }
   }
 
@@ -703,14 +1149,10 @@ export default function App() {
       return
     }
 
-    const connectedWalletAddress = walletAddress
-    if (!connectedWalletAddress) {
-      return
-    }
-
     const name = vaultForm.name.trim()
     const adminCount = Number(vaultForm.adminCount)
     const threshold = Number(vaultForm.threshold)
+    const contractAddressInput = vaultForm.contractAddress.trim()
 
     if (!name) {
       pushToast({
@@ -739,16 +1181,76 @@ export default function App() {
       return
     }
 
+    let adminWallets: string[]
+    try {
+      adminWallets = normalizeEthereumAddressList(vaultForm.adminWallets)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Enter valid admin wallet addresses.'
+      pushToast({
+        title: 'Invalid admin wallet',
+        message,
+        tone: 'error',
+      })
+      return
+    }
+
+    if (adminWallets.length !== adminCount) {
+      pushToast({
+        title: 'Admin wallets required',
+        message: `Add exactly ${adminCount} unique admin wallet address${adminCount === 1 ? '' : 'es'}.`,
+        tone: 'error',
+      })
+      return
+    }
+
+    if (new Set(adminWallets.map((address) => address.toLowerCase())).size !== adminWallets.length) {
+      pushToast({
+        title: 'Duplicate admin wallet',
+        message: 'Each admin wallet can appear only once in a vault.',
+        tone: 'error',
+      })
+      return
+    }
+
+    let contractAddress: string | undefined
+    try {
+      contractAddress = contractAddressInput ? normalizeEthereumAddress(contractAddressInput) : undefined
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Enter a valid vault contract address.'
+      pushToast({
+        title: 'Invalid contract address',
+        message,
+        tone: 'error',
+      })
+      return
+    }
+
+    const algorithmCycle = pqcAlgorithms.length > 0 ? pqcAlgorithms : DEFAULT_PQC_ALGORITHMS
+    const adminDrafts = adminWallets.map((adminWallet, index) => {
+      const algorithm = algorithmCycle[index % algorithmCycle.length]
+      return {
+        walletAddress: adminWallet,
+        algorithm,
+      }
+    })
+
     const tempId = createTempId('vault')
     const optimisticVault: Vault = {
       id: tempId,
       name,
-      balance: '$0.00',
+      balance: contractAddress ? 'Loading' : 'Deploying contract...',
+      isActive: Boolean(contractAddress),
       adminCount,
-      network: 'Creating vault',
+      network: 'sepolia',
+      contractAddress,
       pendingApprovals: 0,
       threshold,
-      generatedAdminKeys: [],
+      generatedAdminKeys: adminDrafts.map((admin) => ({
+        name: `${formatWalletAddress(admin.walletAddress)} ${admin.algorithm.label}`,
+        publicKey: '',
+        algorithm: admin.algorithm.name,
+        walletAddress: admin.walletAddress,
+      })),
       isPending: true,
     }
 
@@ -758,9 +1260,13 @@ export default function App() {
       const response = await runCreateVault({
         name,
         threshold,
-        admins: Array.from({ length: adminCount }, (_, index) => ({
-          name: `${connectedWalletAddress} PQC ${index + 1}`,
+        contract_address: contractAddress,
+        network: 'sepolia',
+        admins: adminDrafts.map((admin) => ({
+          name: `${formatWalletAddress(admin.walletAddress)} ${admin.algorithm.label} admin`,
+          wallet_address: admin.walletAddress,
           generate_keypair: true,
+          algorithm: admin.algorithm.name,
         })),
       })
 
@@ -780,11 +1286,14 @@ export default function App() {
         setVaultForm(DEFAULT_VAULT_FORM)
         setApiNotice('Live vault and proposal actions are connected to FastAPI.')
       })
+      setIsCreateVaultOpen(false)
 
       addActivity('Vault created', `${mappedVault.name} is ready for proposal submissions.`)
       pushToast({
         title: 'Vault created',
-        message: `${walletIdentityLabel} created ${mappedVault.name} with ${mappedVault.adminCount} admins.`,
+        message: mappedVault.contractAddress
+          ? `${walletIdentityLabel} created ${mappedVault.name} and linked ${truncateHash(mappedVault.contractAddress, 10, 8)}.`
+          : `${walletIdentityLabel} created ${mappedVault.name} with ${mappedVault.adminCount} admins.`,
         tone: 'success',
       })
     } catch (error) {
@@ -816,6 +1325,7 @@ export default function App() {
     const description = proposalForm.description.trim()
     const destination = proposalForm.recipientAddress.trim()
     const amountEth = proposalForm.amountEth.trim()
+    const onchainProposalIdValue = proposalForm.onchainProposalId.trim()
 
     if (!vaultApiId) {
       pushToast({
@@ -858,10 +1368,26 @@ export default function App() {
       return
     }
 
+    let onchainProposalId: number | undefined
+    if (onchainProposalIdValue) {
+      const parsedOnchainProposalId = Number(onchainProposalIdValue)
+      if (!Number.isInteger(parsedOnchainProposalId) || parsedOnchainProposalId < 0) {
+        pushToast({
+          title: 'Invalid onchain proposal',
+          message: 'Onchain proposal ID must be a zero-based integer.',
+          tone: 'error',
+        })
+        return
+      }
+      onchainProposalId = parsedOnchainProposalId
+    }
+
+    const useVaultContract = Boolean(selectedVault.contractAddress)
     const tempId = createTempId('proposal')
     const optimisticProposal: Proposal = {
       id: tempId,
       vaultApiId,
+      contractAddress: selectedVault.contractAddress ?? null,
       title,
       description: description || 'No description provided.',
       destination: normalizedTransaction.destination,
@@ -876,9 +1402,11 @@ export default function App() {
       currentStep: 0,
       signatures: [],
       approvalRecords: [],
+      signatureAuditLog: [],
       signaturePublicKeys: [],
       approvalPublicKeys: [],
       approvalWalletAddresses: [],
+      onchainProposalId: onchainProposalId ?? null,
       isPending: true,
     }
 
@@ -895,10 +1423,13 @@ export default function App() {
         description: description || undefined,
         destination: normalizedTransaction.destination,
         amount_eth: normalizedTransaction.amountEth,
+        proposer_wallet_address: connectedWalletAddress,
+        onchain_proposal_id: onchainProposalId,
         payload: {
           source: 'react-ui',
           created_from: 'dashboard',
           created_by_wallet: connectedWalletAddress,
+          execution_mode: useVaultContract ? 'vault_contract' : 'direct_transfer',
         },
       })
 
@@ -918,6 +1449,7 @@ export default function App() {
         }))
         setApiNotice('Live proposals are now syncing from the backend.')
       })
+      setIsProposalFlowOpen(false)
 
       addActivity('Proposal created', `${mappedProposal.title} was submitted to ${selectedVault.name}.`)
       pushToast({
@@ -998,11 +1530,12 @@ export default function App() {
       return
     }
 
-    const signer = getNextSignerForProposal(proposal)
+    const selectedAlgorithm = getSelectedAlgorithmForProposal(proposal, connectedWalletAddress)
+    const signer = getNextSignerForProposal(proposal, connectedWalletAddress)
     if (!signer?.publicKey) {
       pushToast({
         title: 'No signer available',
-        message: 'This vault does not have an unused generated admin key available for signing.',
+        message: 'This wallet is not registered as a vault admin for this proposal.',
         tone: 'error',
       })
       return
@@ -1019,7 +1552,7 @@ export default function App() {
       const response = await runSignProposal({
         proposal_id: proposal.apiId,
         admin_public_key: signer.publicKey,
-        algorithm: signer.algorithm,
+        algorithm: selectedAlgorithm,
         signer_wallet_address: connectedWalletAddress,
       })
 
@@ -1034,16 +1567,24 @@ export default function App() {
         ),
       )
       setSelectedProposalId(mappedProposal.id)
+      recordBackendDebugEntry(mappedProposal.id, 'sign', response)
+      if (response.verification) {
+        recordBackendDebugEntry(mappedProposal.id, 'verify', response.verification)
+      }
       setProposalNotice(mappedProposal.id, {
         tone: 'success',
         title: 'Signature verified',
-        message: 'Approval is now enabled for this verified signature.',
+        message: response.key_status
+          ? `${response.key_status}. Approval is now enabled for this verified signature.`
+          : 'Approval is now enabled for this verified signature.',
       })
 
       addActivity('Signature verified', `${walletIdentityLabel} signed ${mappedProposal.title}.`)
       pushToast({
         title: 'Signature verified',
-        message: `${walletIdentityLabel} verified the PQC signature for ${mappedProposal.title}.`,
+        message: response.key_status
+          ? `${walletIdentityLabel} used ${selectedAlgorithm} and ${response.key_status.toLowerCase()} for ${mappedProposal.title}.`
+          : `${walletIdentityLabel} verified the PQC signature for ${mappedProposal.title}.`,
         tone: 'success',
       })
     } catch (error) {
@@ -1148,6 +1689,7 @@ export default function App() {
         ),
       )
       setSelectedProposalId(mappedProposal.id)
+      recordBackendDebugEntry(mappedProposal.id, 'approve', response)
 
       if (crossedThreshold && proposal.vaultApiId) {
         adjustVaultPendingApprovals(proposal.vaultApiId, -1)
@@ -1189,8 +1731,88 @@ export default function App() {
     }
   }
 
+  async function handleRegisterAllPqcAlgorithms(proposalId: string) {
+    if (!ensureWalletReady('register PQC algorithms')) {
+      return
+    }
+
+    const connectedWalletAddress = walletAddress
+    if (!connectedWalletAddress) {
+      return
+    }
+
+    const proposal = proposals.find((candidate) => candidate.id === proposalId)
+    if (!proposal?.vaultApiId) {
+      pushToast({
+        title: 'Vault required',
+        message: 'Select a live proposal before registering PQC algorithms.',
+        tone: 'error',
+      })
+      return
+    }
+
+    if (!getNextSignerForProposal(proposal, connectedWalletAddress)?.publicKey) {
+      pushToast({
+        title: 'Wallet not registered',
+        message: 'This wallet must be registered as a vault admin before PQC keys can be generated.',
+        tone: 'error',
+      })
+      return
+    }
+
+    setProposalNotice(proposalId, {
+      tone: 'info',
+      title: 'Registering PQC algorithms',
+      message: 'Generating any missing Dilithium, Falcon, and SPHINCS+ keys for this wallet.',
+    })
+
+    try {
+      const response: ApiRegisterWalletPqcResponse = await runRegisterWalletPqcAlgorithms({
+        vault_id: proposal.vaultApiId,
+        wallet_address: connectedWalletAddress,
+      })
+
+      recordBackendDebugEntry(proposalId, 'register-pqc-wallet', response)
+      const generatedCount = (response.registrations ?? []).filter((entry) => entry.key_generated).length
+      setProposalNotice(proposalId, {
+        tone: 'success',
+        title: 'PQC algorithms ready',
+        message:
+          generatedCount > 0
+            ? `${generatedCount} new key${generatedCount === 1 ? '' : 's'} generated for this wallet.`
+            : 'All wallet algorithms were already registered.',
+      })
+      pushToast({
+        title: 'PQC algorithms ready',
+        message:
+          generatedCount > 0
+            ? `Generated ${generatedCount} missing PQC key${generatedCount === 1 ? '' : 's'} for ${walletIdentityLabel}.`
+            : `All PQC algorithms are already registered for ${walletIdentityLabel}.`,
+        tone: 'success',
+      })
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unable to register PQC algorithms for this wallet.'
+      setProposalNotice(proposalId, {
+        tone: 'error',
+        title: 'Registration failed',
+        message,
+      })
+      pushToast({
+        title: 'Registration failed',
+        message,
+        tone: 'error',
+      })
+    }
+  }
+
   async function handleExecuteProposal(proposalId: string) {
     if (!ensureWalletReady('execute a proposal')) {
+      return
+    }
+
+    const connectedWalletAddress = walletAddress
+    if (!connectedWalletAddress) {
       return
     }
 
@@ -1240,7 +1862,10 @@ export default function App() {
     })
 
     try {
-      const response: ApiExecuteProposalResponse = await runExecuteProposal(proposal.apiId)
+      const response: ApiExecuteProposalResponse = await runExecuteProposal(
+        proposal.apiId,
+        connectedWalletAddress,
+      )
       const mappedProposal = mapApiProposal(response.proposal ?? null)
       if (!mappedProposal) {
         throw new Error('Execution completed, but the updated proposal payload was missing.')
@@ -1252,6 +1877,7 @@ export default function App() {
         ),
       )
       setSelectedProposalId(mappedProposal.id)
+      recordBackendDebugEntry(mappedProposal.id, 'execute', response)
 
       const transactionHash = response.transaction_hash ?? mappedProposal.executionTxHash ?? ''
       setProposalNotice(mappedProposal.id, {
@@ -1329,8 +1955,14 @@ export default function App() {
   const selectedProposalHasApproved = selectedProposal
     ? hasWalletApprovedProposal(selectedProposal, walletAddress)
     : false
+  const selectedProposalAvailableAlgorithms = selectedProposal
+    ? getAvailableAlgorithmsForProposal(selectedProposal, walletAddress)
+    : pqcAlgorithms
+  const selectedProposalAlgorithm = selectedProposal
+    ? getSelectedAlgorithmForProposal(selectedProposal, walletAddress)
+    : pqcAlgorithms[0]?.name ?? DEFAULT_PQC_ALGORITHMS[0].name
   const selectedProposalHasSigner = selectedProposal
-    ? Boolean(getNextSignerForProposal(selectedProposal)?.publicKey)
+    ? Boolean(getNextSignerForProposal(selectedProposal, walletAddress)?.publicKey)
     : false
   const selectedProposalSignatureState: SignatureState = selectedProposalPendingSignature || selectedProposalHasApproved
     ? 'verified'
@@ -1349,6 +1981,11 @@ export default function App() {
     selectedProposal &&
       selectedProposal.status === 'pending' &&
       selectedProposalPendingSignature,
+  )
+  const selectedProposalCanRegisterAlgorithms = Boolean(
+    selectedProposal &&
+      selectedProposal.status === 'pending' &&
+      getNextSignerForProposal(selectedProposal, walletAddress)?.publicKey,
   )
   const selectedProposalCanExecute = Boolean(
     selectedProposal &&
@@ -1375,80 +2012,161 @@ export default function App() {
       : 'Approve'
   const selectedProposalExecuteLabel =
     selectedProposal?.status === 'executed' ? 'Executed' : 'Execute'
+  const selectedProposalAlgorithmOption =
+    pqcAlgorithms.find((algorithm) => algorithm.name === selectedProposalAlgorithm) ??
+    DEFAULT_PQC_ALGORITHMS.find((algorithm) => algorithm.name === selectedProposalAlgorithm) ??
+    null
+  const selectedProposalAlgorithmLabel =
+    selectedProposalAlgorithmOption?.label ?? selectedProposalAlgorithm
+  const selectedProposalCanUseSelectedAlgorithm =
+    selectedProposalAvailableAlgorithms.some((algorithm) => algorithm.name === selectedProposalAlgorithm)
   const walletGateMode = !walletAddress ? 'connect' : !isOnSepolia ? 'switch' : null
+  const greeting = getGreeting()
+  const aggregateVaultBalance = formatAggregateBalance(vaults)
+  const readyToExecuteCount = proposals.filter((proposal) => proposal.status === 'approved').length
+  const pendingApprovalsCount = vaults.reduce((sum, vault) => sum + vault.pendingApprovals, 0)
+  const signableProposals = proposals.filter(
+    (proposal) =>
+      Boolean(
+        proposal.apiId &&
+          proposal.vaultApiId &&
+          proposal.status === 'pending' &&
+          !getSignatureForWallet(proposal, walletAddress) &&
+          !hasWalletApprovedProposal(proposal, walletAddress) &&
+          !getPendingVerifiedSignatureForWallet(proposal, walletAddress) &&
+          getNextSignerForProposal(proposal, walletAddress)?.publicKey,
+      ),
+  )
+  const approvableProposals = proposals.filter(
+    (proposal) =>
+      Boolean(
+        proposal.apiId &&
+          proposal.status === 'pending' &&
+          getPendingVerifiedSignatureForWallet(proposal, walletAddress),
+      ),
+  )
+  const executableProposals = proposals.filter(
+    (proposal) => Boolean(proposal.apiId && proposal.status === 'approved'),
+  )
+  const signableProposal = signableProposals[0] ?? null
+  const approvableProposal = approvableProposals[0] ?? null
+  const executableProposal = executableProposals[0] ?? null
+  const recentProposalList = proposals.slice(0, 4)
+
+  function openCreateVaultModal() {
+    if (!ensureWalletReady('create a vault')) {
+      return
+    }
+
+    setIsCreateVaultOpen(true)
+  }
+
+  function openProposalFlowModal() {
+    if (!ensureWalletReady('create a proposal')) {
+      return
+    }
+
+    if (liveVaultOptions.length === 0) {
+      pushToast({
+        title: 'Vault required',
+        message: 'Create a vault first so the transfer flow has a live destination.',
+        tone: 'error',
+      })
+      return
+    }
+
+    setProposalForm((currentForm) => ({
+      ...currentForm,
+      vaultApiId: currentForm.vaultApiId || String(liveVaultOptions[0]?.apiId ?? ''),
+    }))
+    setIsProposalFlowOpen(true)
+  }
+
+  function focusProposalForAction(
+    proposal: Proposal | null,
+    emptyStateTitle: string,
+    emptyStateMessage: string,
+    requiredAction: string,
+  ) {
+    if (!ensureWalletReady(requiredAction)) {
+      return
+    }
+
+    if (!proposal) {
+      pushToast({
+        title: emptyStateTitle,
+        message: emptyStateMessage,
+        tone: 'error',
+      })
+      return
+    }
+
+    setSelectedProposalId(proposal.id)
+    setActiveSection('Dashboard')
+  }
+
+  useEffect(() => {
+    if (!selectedProposal) {
+      return
+    }
+
+    console.log('[PQC Debug] Selected algorithm', {
+      proposalId: selectedProposal.id,
+      algorithm: selectedProposalAlgorithmLabel,
+      walletAddress: walletAddress ?? 'Not connected',
+    })
+  }, [selectedProposal?.id, selectedProposalAlgorithmLabel, walletAddress])
 
   return (
-    <div className="flex min-h-screen bg-gray-50 text-gray-900 transition-colors duration-200 dark:bg-[#0B0F19] dark:text-gray-200">
-      <Sidebar items={navItems} activeItem={activeSection} onSelect={setActiveSection} />
+    <div className="min-h-screen bg-gray-50 text-gray-900 transition-colors duration-200 dark:bg-slate-950 dark:text-gray-200">
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} />
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <ToastViewport toasts={toasts} onDismiss={dismissToast} />
+      <CreateVaultModal
+        isOpen={isCreateVaultOpen}
+        onClose={() => setIsCreateVaultOpen(false)}
+        form={vaultForm}
+        onFieldChange={updateVaultFormField}
+        onSubmit={handleCreateVaultSubmit}
+        loading={createVaultLoading}
+      />
 
-        <div className="border-b border-gray-200 bg-white/90 backdrop-blur dark:border-gray-700 dark:bg-gray-900/90">
-          <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-500 dark:text-gray-400">{activeSection}</p>
-              <h1 className="mt-1 text-lg font-semibold text-gray-900 dark:text-gray-100">PQC Vault</h1>
-              <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                Quantum-safe proposal approvals with onchain execution feedback.
-              </p>
+      <ProposalFlowModal
+        isOpen={isProposalFlowOpen}
+        onClose={() => setIsProposalFlowOpen(false)}
+        form={proposalForm}
+        vaultOptions={liveVaultOptions}
+        onFieldChange={updateProposalFormField}
+        onSubmit={handleCreateProposalSubmit}
+        loading={createProposalLoading}
+      />
 
-              <div className="mt-3 flex flex-wrap items-center gap-2 lg:hidden">
-                {navItems.map((item) => {
-                  const isActive = item === activeSection
-
-                  return (
-                    <button
-                      key={item}
-                      type="button"
-                      onClick={() => setActiveSection(item)}
-                      className={`rounded-lg px-3 py-2 text-sm font-medium transition duration-200 ${
-                        isActive
-                          ? 'bg-blue-50 text-blue-700 dark:bg-cyan-400/10 dark:text-cyan-300'
-                          : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-300 dark:hover:bg-slate-800 dark:hover:text-gray-100'
-                      }`}
-                    >
-                      {item}
-                    </button>
-                  )
-                })}
+      <header className="sticky top-0 z-40 border-b border-gray-200/80 bg-white/90 backdrop-blur-xl dark:border-gray-800 dark:bg-slate-950/85">
+        <div className="mx-auto max-w-7xl px-4 py-4 sm:px-6">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center gap-4">
+              <AppMark />
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-blue-600 dark:text-blue-300">
+                  Quantum-safe treasury
+                </p>
+                <h1 className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100">
+                  PQC Vault
+                </h1>
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="rounded-xl border border-gray-200 bg-white px-3 py-2 shadow-sm dark:border-gray-700 dark:bg-gray-900">
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                  {walletAddress ? 'Connected wallet' : hasMetaMask ? 'Wallet disconnected' : 'MetaMask unavailable'}
+            <div className="flex flex-wrap items-center justify-end gap-3">
+              <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 shadow-md dark:border-gray-700 dark:bg-slate-900">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-400 dark:text-gray-500">
+                  Wallet
                 </p>
-                <p className="mt-1 font-mono text-xs text-gray-500 dark:text-gray-400" title={walletAddress ?? undefined}>
-                  {walletIdentityLabel}
+                <p
+                  className="mt-1 font-mono text-sm font-semibold text-gray-900 dark:text-gray-100"
+                  title={walletAddress ?? undefined}
+                >
+                  {formatCompactWallet(walletAddress)}
                 </p>
-                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{networkLabel}</p>
               </div>
-
-              {!walletAddress ? (
-                <button
-                  type="button"
-                  onClick={handleConnectWallet}
-                  disabled={!hasMetaMask || walletActionLoading === 'connect'}
-                  className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition duration-200 hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-70 dark:bg-cyan-400 dark:text-slate-950 dark:hover:bg-cyan-300"
-                >
-                  {walletActionLoading === 'connect' ? <LoadingSpinner className="h-4 w-4" /> : null}
-                  Connect Wallet
-                </button>
-              ) : null}
-
-              {walletAddress && !isOnSepolia ? (
-                <button
-                  type="button"
-                  onClick={handleSwitchNetwork}
-                  disabled={walletActionLoading === 'switch'}
-                  className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-medium text-amber-700 transition duration-200 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-70 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-300 dark:hover:bg-amber-950/40"
-                >
-                  {walletActionLoading === 'switch' ? <LoadingSpinner className="h-4 w-4" /> : null}
-                  Switch Network
-                </button>
-              ) : null}
 
               <ThemeToggle
                 theme={theme}
@@ -1458,78 +2176,116 @@ export default function App() {
               />
             </div>
           </div>
-        </div>
 
-        <ProposalModal
-          proposal={selectedProposal}
-          vaultName={selectedVault?.name ?? 'Unknown vault'}
-          explorerUrl={selectedProposalExplorerUrl}
-          onClose={() => setSelectedProposalId(null)}
-          onSign={() => {
-            if (selectedProposal) {
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            {navItems.map((item) => (
+              <DashboardTab
+                key={item}
+                label={item}
+                active={activeSection === item}
+                onClick={() => setActiveSection(item)}
+              />
+            ))}
+          </div>
+        </div>
+      </header>
+
+        {selectedProposal ? (
+          <ProposalModal
+            proposal={selectedProposal}
+            vaultName={selectedVault?.name ?? 'Unknown vault'}
+            explorerUrl={selectedProposalExplorerUrl}
+            currentWalletAddress={walletAddress}
+            selectedAlgorithmLabel={selectedProposalAlgorithmLabel}
+            isSelectedAlgorithmAvailable={selectedProposalCanUseSelectedAlgorithm}
+            onClose={() => setSelectedProposalId(null)}
+            onSign={() => {
               void handleSignProposal(selectedProposal.id)
-            }
-          }}
-          onApprove={() => {
-            if (selectedProposal) {
+            }}
+            onApprove={() => {
               void handleApproveProposal(selectedProposal.id)
-            }
-          }}
-          onExecute={() => {
-            if (selectedProposal) {
+            }}
+            onRegisterAllAlgorithms={() => {
+              void handleRegisterAllPqcAlgorithms(selectedProposal.id)
+            }}
+            onExecute={() => {
               void handleExecuteProposal(selectedProposal.id)
+            }}
+            signLoading={Boolean(signingProposalId === selectedProposal.id && signProposalLoading)}
+            approveLoading={Boolean(
+              approvingProposalId === selectedProposal.id && approveProposalLoading,
+            )}
+            registerAllLoading={Boolean(registerWalletPqcAlgorithmsLoading)}
+            executeLoading={Boolean(
+              executingProposalId === selectedProposal.id && executeProposalLoading,
+            )}
+            signDisabled={
+              !selectedProposalCanSign ||
+              Boolean(
+                signingProposalId === selectedProposal.id ||
+                  approvingProposalId === selectedProposal.id ||
+                  executingProposalId === selectedProposal.id,
+              )
             }
-          }}
-          signLoading={Boolean(selectedProposal && signingProposalId === selectedProposal.id && signProposalLoading)}
-          approveLoading={Boolean(
-            selectedProposal && approvingProposalId === selectedProposal.id && approveProposalLoading,
-          )}
-          executeLoading={Boolean(
-            selectedProposal && executingProposalId === selectedProposal.id && executeProposalLoading,
-          )}
-          signDisabled={
-            !selectedProposal ||
-            !selectedProposalCanSign ||
-            Boolean(
-              signingProposalId === selectedProposal.id ||
-                approvingProposalId === selectedProposal.id ||
-                executingProposalId === selectedProposal.id,
-            )
-          }
-          approveDisabled={
-            !selectedProposal ||
-            !selectedProposalCanApprove ||
-            Boolean(
-              signingProposalId === selectedProposal.id ||
-                approvingProposalId === selectedProposal.id ||
-                executingProposalId === selectedProposal.id,
-            )
-          }
-          executeDisabled={
-            !selectedProposal ||
-            !selectedProposalCanExecute ||
-            Boolean(
-              signingProposalId === selectedProposal.id ||
-                approvingProposalId === selectedProposal.id ||
-                executingProposalId === selectedProposal.id,
-            )
-          }
-          signLabel={signingProposalId === selectedProposal?.id ? 'Signing...' : selectedProposalSignLabel}
-          approveLabel={approvingProposalId === selectedProposal?.id ? 'Approving...' : selectedProposalApproveLabel}
-          executeLabel={executingProposalId === selectedProposal?.id ? 'Executing...' : selectedProposalExecuteLabel}
-          currentWalletSignatureState={selectedProposalSignatureState}
-          notice={selectedProposal ? proposalNotices[selectedProposal.id] ?? null : null}
-        />
+            approveDisabled={
+              !selectedProposalCanApprove ||
+              Boolean(
+                signingProposalId === selectedProposal.id ||
+                  approvingProposalId === selectedProposal.id ||
+                  executingProposalId === selectedProposal.id,
+              )
+            }
+            registerAllDisabled={
+              !selectedProposalCanRegisterAlgorithms ||
+              Boolean(
+                signingProposalId === selectedProposal.id ||
+                  approvingProposalId === selectedProposal.id ||
+                  executingProposalId === selectedProposal.id ||
+                  registerWalletPqcAlgorithmsLoading,
+              )
+            }
+            executeDisabled={
+              !selectedProposalCanExecute ||
+              Boolean(
+                signingProposalId === selectedProposal.id ||
+                  approvingProposalId === selectedProposal.id ||
+                  executingProposalId === selectedProposal.id,
+              )
+            }
+            signLabel={signingProposalId === selectedProposal.id ? 'Signing...' : selectedProposalSignLabel}
+            approveLabel={approvingProposalId === selectedProposal.id ? 'Approving...' : selectedProposalApproveLabel}
+            executeLabel={executingProposalId === selectedProposal.id ? 'Executing...' : selectedProposalExecuteLabel}
+            currentWalletSignatureState={selectedProposalSignatureState}
+            pqcAlgorithms={pqcAlgorithms}
+            availablePqcAlgorithms={selectedProposalAvailableAlgorithms}
+            selectedPqcAlgorithm={selectedProposalAlgorithm}
+            onSelectPqcAlgorithm={(algorithm) => {
+              console.log('[PQC Debug] Algorithm changed', {
+                proposalId: selectedProposal.id,
+                walletAddress: walletAddress ?? 'Not connected',
+                algorithm,
+              })
+              setSelectedPqcAlgorithms((currentAlgorithms) => ({
+                ...currentAlgorithms,
+                [getAlgorithmSelectionKey(selectedProposal.id, walletAddress)]: algorithm,
+              }))
+            }}
+            debugEntries={backendDebugEntries[selectedProposal.id] ?? []}
+            isDebugVisible={isBackendDebugVisible}
+            onToggleDebug={() => setIsBackendDebugVisible((isVisible) => !isVisible)}
+            notice={proposalNotices[selectedProposal.id] ?? null}
+          />
+        ) : null}
 
         <motion.main
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.28, ease: 'easeOut' }}
-        className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6"
+        className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6"
       >
         <div className="space-y-6">
           {walletGateMode ? (
-            <section className="mx-auto max-w-3xl rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-700 dark:bg-gray-900">
+            <section className="mx-auto max-w-3xl rounded-2xl border border-gray-200 bg-white p-6 shadow-md dark:border-gray-700 dark:bg-slate-900">
               <p className="text-sm font-medium text-blue-600 dark:text-cyan-400">Wallet access</p>
               <h1 className="mt-2 text-lg font-semibold text-gray-900 dark:text-gray-100">
                 {walletGateMode === 'connect'
@@ -1563,6 +2319,11 @@ export default function App() {
                 <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 dark:border-gray-700 dark:bg-slate-800/80">
                   <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Current wallet</p>
                   <p className="mt-1 font-mono text-xs text-gray-500 dark:text-gray-400">{walletIdentityLabel}</p>
+                  {walletAddress ? (
+                    <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      {walletEthBalance ? `Balance ${walletEthBalance}` : 'Balance loading'}
+                    </p>
+                  ) : null}
                 </div>
               </div>
 
@@ -1575,246 +2336,128 @@ export default function App() {
           ) : (
             <>
               {apiNotice ? (
-                <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700 dark:border-cyan-900/60 dark:bg-cyan-950/20 dark:text-cyan-300">
+                <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700 shadow-md dark:border-cyan-900/60 dark:bg-cyan-950/20 dark:text-cyan-300">
                   {apiNotice}
                 </div>
               ) : null}
 
           {activeSection === 'Dashboard' ? (
             <>
-              <section className="grid gap-6 lg:grid-cols-2">
-                <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-900">
-                  <div className="mb-4">
-                    <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Create vault</h2>
-                    <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                      Configure a vault, admin count, and approval threshold.
+              <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-md dark:border-gray-700 dark:bg-slate-900">
+                <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-blue-600 dark:text-blue-300">
+                      {greeting}
+                    </p>
+                    <h2 className="mt-2 text-2xl font-semibold text-gray-900 dark:text-gray-100">
+                      Welcome back
+                    </h2>
+                    <p className="mt-4 text-sm font-medium text-gray-500 dark:text-gray-400">
+                      Connected wallet
+                    </p>
+                    <p className="mt-1 break-all font-mono text-sm text-gray-900 dark:text-gray-100">
+                      {walletAddress ?? walletIdentityLabel}
                     </p>
                   </div>
 
-                  <form onSubmit={handleCreateVaultSubmit} className="space-y-4">
-                    <label className="block">
-                      <span className="text-sm font-medium text-gray-600 dark:text-gray-400">Vault name</span>
-                      <input
-                        value={vaultForm.name}
-                        onChange={(event) =>
-                          setVaultForm((currentForm) => ({
-                            ...currentForm,
-                            name: event.target.value,
-                          }))
-                        }
-                        className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition duration-200 focus:border-blue-400 dark:border-gray-700 dark:bg-gray-900 dark:focus:border-cyan-400"
-                        placeholder="Treasury Alpha"
-                      />
-                    </label>
-
-                    <div className="grid gap-4 sm:grid-cols-2">
-                      <label>
-                        <span className="text-sm font-medium text-gray-600 dark:text-gray-400">Admin count</span>
-                        <input
-                          type="number"
-                          min="1"
-                          value={vaultForm.adminCount}
-                          onChange={(event) =>
-                            setVaultForm((currentForm) => ({
-                              ...currentForm,
-                              adminCount: event.target.value,
-                            }))
-                          }
-                          className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition duration-200 focus:border-blue-400 dark:border-gray-700 dark:bg-gray-900 dark:focus:border-cyan-400"
-                        />
-                      </label>
-
-                      <label>
-                        <span className="text-sm font-medium text-gray-600 dark:text-gray-400">Threshold</span>
-                        <input
-                          type="number"
-                          min="1"
-                          value={vaultForm.threshold}
-                          onChange={(event) =>
-                            setVaultForm((currentForm) => ({
-                              ...currentForm,
-                              threshold: event.target.value,
-                            }))
-                          }
-                          className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition duration-200 focus:border-blue-400 dark:border-gray-700 dark:bg-gray-900 dark:focus:border-cyan-400"
-                        />
-                      </label>
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="text-sm text-gray-500 dark:text-gray-400">
-                        Vault admins are generated from the current wallet session.
-                      </p>
-                      <button
-                        type="submit"
-                        disabled={createVaultLoading}
-                        className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition duration-200 hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-70 dark:bg-cyan-400 dark:text-slate-950 dark:hover:bg-cyan-300"
-                      >
-                        {createVaultLoading ? <LoadingSpinner className="h-4 w-4" /> : null}
-                        Create vault
-                      </button>
-                    </div>
-                  </form>
-                </section>
-
-                <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-900">
-                  <div className="mb-4">
-                    <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Create proposal</h2>
-                    <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                      Submit a transaction request for PQC approval.
+                  <div className="rounded-2xl bg-gray-50 p-4 dark:bg-slate-800/80 lg:min-w-[280px]">
+                    <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Vault balance</p>
+                    <p className="mt-2 text-2xl font-semibold text-gray-900 dark:text-gray-100">
+                      {aggregateVaultBalance}
+                    </p>
+                    <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                      {summaryVault
+                        ? `${summaryVault.name} on ${summaryVault.network}`
+                        : 'Create a vault to start tracking treasury balances.'}
                     </p>
                   </div>
-
-                  <form onSubmit={handleCreateProposalSubmit} className="space-y-4">
-                    <label className="block">
-                      <span className="text-sm font-medium text-gray-600 dark:text-gray-400">Vault</span>
-                      <select
-                        value={proposalForm.vaultApiId}
-                        onChange={(event) =>
-                          setProposalForm((currentForm) => ({
-                            ...currentForm,
-                            vaultApiId: event.target.value,
-                          }))
-                        }
-                        className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition duration-200 focus:border-blue-400 dark:border-gray-700 dark:bg-gray-900 dark:focus:border-cyan-400"
-                      >
-                        <option value="">Select a live vault</option>
-                        {liveVaultOptions.map((vault) => (
-                          <option key={vault.id} value={vault.apiId}>
-                            {vault.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label className="block">
-                      <span className="text-sm font-medium text-gray-600 dark:text-gray-400">Title</span>
-                      <input
-                        value={proposalForm.title}
-                        onChange={(event) =>
-                          setProposalForm((currentForm) => ({
-                            ...currentForm,
-                            title: event.target.value,
-                          }))
-                        }
-                        className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition duration-200 focus:border-blue-400 dark:border-gray-700 dark:bg-gray-900 dark:focus:border-cyan-400"
-                        placeholder="Ops treasury payout"
-                      />
-                    </label>
-
-                    <label className="block">
-                      <span className="text-sm font-medium text-gray-600 dark:text-gray-400">Description</span>
-                      <textarea
-                        value={proposalForm.description}
-                        onChange={(event) =>
-                          setProposalForm((currentForm) => ({
-                            ...currentForm,
-                            description: event.target.value,
-                          }))
-                        }
-                        rows={3}
-                        className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition duration-200 focus:border-blue-400 dark:border-gray-700 dark:bg-gray-900 dark:focus:border-cyan-400"
-                        placeholder="Describe the treasury action."
-                      />
-                    </label>
-
-                    <div className="grid gap-4 sm:grid-cols-2">
-                      <label>
-                        <span className="text-sm font-medium text-gray-600 dark:text-gray-400">Recipient address</span>
-                        <input
-                          value={proposalForm.recipientAddress}
-                          onChange={(event) =>
-                            setProposalForm((currentForm) => ({
-                              ...currentForm,
-                              recipientAddress: event.target.value,
-                            }))
-                          }
-                          className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 font-mono text-sm outline-none transition duration-200 focus:border-blue-400 dark:border-gray-700 dark:bg-gray-900 dark:focus:border-cyan-400"
-                          placeholder="0x1111111111111111111111111111111111111111"
-                        />
-                      </label>
-
-                      <label>
-                        <span className="text-sm font-medium text-gray-600 dark:text-gray-400">Amount (ETH)</span>
-                        <input
-                          value={proposalForm.amountEth}
-                          onChange={(event) =>
-                            setProposalForm((currentForm) => ({
-                              ...currentForm,
-                              amountEth: event.target.value,
-                            }))
-                          }
-                          inputMode="decimal"
-                          className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition duration-200 focus:border-blue-400 dark:border-gray-700 dark:bg-gray-900 dark:focus:border-cyan-400"
-                          placeholder="0.01"
-                        />
-                      </label>
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="text-sm text-gray-500 dark:text-gray-400">
-                        {liveVaultOptions.length > 0
-                          ? 'Choose a live vault so signing can use stored PQC keys.'
-                          : 'Create a vault first to enable proposal submission.'}
-                      </p>
-                      <button
-                        type="submit"
-                        disabled={createProposalLoading}
-                        className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition duration-200 hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-70 dark:bg-cyan-400 dark:text-slate-950 dark:hover:bg-cyan-300"
-                      >
-                        {createProposalLoading ? <LoadingSpinner className="h-4 w-4" /> : null}
-                        Create proposal
-                      </button>
-                    </div>
-                  </form>
-                </section>
-              </section>
-
-              <section className="grid gap-4 sm:grid-cols-3">
-                <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-700 dark:bg-gray-900">
-                  <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Live vaults</p>
-                  <p className="mt-2 text-lg font-semibold text-gray-900 dark:text-gray-100">{vaults.length}</p>
-                </div>
-                <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-700 dark:bg-gray-900">
-                  <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Ready to execute</p>
-                  <p className="mt-2 text-lg font-semibold text-gray-900 dark:text-gray-100">
-                    {proposals.filter((proposal) => proposal.status === 'approved').length}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-700 dark:bg-gray-900">
-                  <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Pending approvals</p>
-                  <p className="mt-2 text-lg font-semibold text-gray-900 dark:text-gray-100">
-                    {vaults.reduce((sum, vault) => sum + vault.pendingApprovals, 0)}
-                  </p>
                 </div>
               </section>
+
+              <WidgetShell
+                title="Quick actions"
+                subtitle="Launch the existing vault, proposal, signing, approval, and execution flows from one place."
+              >
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+                  <QuickActionCard
+                    icon={<VaultIcon />}
+                    title="Create Vault"
+                    description="Open the current vault creation flow and configure admins, thresholds, and contract deployment."
+                    meta={`${vaults.length} live`}
+                    onClick={openCreateVaultModal}
+                  />
+                  <QuickActionCard
+                    icon={<ProposalIcon />}
+                    title="Create Proposal"
+                    description="Start a transaction proposal using the existing proposal modal and live vault list."
+                    meta={liveVaultOptions.length > 0 ? `${liveVaultOptions.length} vaults` : 'Vault required'}
+                    onClick={openProposalFlowModal}
+                  />
+                  <QuickActionCard
+                    icon={<SignIcon />}
+                    title="Sign"
+                    description="Jump into the next proposal that is waiting for your PQC signature."
+                    meta={signableProposals.length > 0 ? `${signableProposals.length} ready` : 'No queue'}
+                    onClick={() =>
+                      focusProposalForAction(
+                        signableProposal,
+                        'No signable proposal',
+                        'There are no proposals awaiting your PQC signature right now.',
+                        'sign a proposal',
+                      )
+                    }
+                  />
+                  <QuickActionCard
+                    icon={<ApproveIcon />}
+                    title="Approve"
+                    description="Open the next verified proposal so you can record the existing approval step."
+                    meta={approvableProposals.length > 0 ? `${approvableProposals.length} ready` : `${pendingApprovalsCount} pending`}
+                    onClick={() =>
+                      focusProposalForAction(
+                        approvableProposal,
+                        'No approvable proposal',
+                        'There are no proposals with a verified signature ready for approval.',
+                        'approve a proposal',
+                      )
+                    }
+                  />
+                  <QuickActionCard
+                    icon={<ExecuteIcon />}
+                    title="Execute"
+                    description="Go straight to the next threshold-approved proposal and run the existing execute flow."
+                    meta={executableProposals.length > 0 ? `${readyToExecuteCount} ready` : 'Threshold pending'}
+                    onClick={() =>
+                      focusProposalForAction(
+                        executableProposal,
+                        'Nothing to execute',
+                        'There are no approved proposals ready for on-chain execution.',
+                        'execute a proposal',
+                      )
+                    }
+                  />
+                </div>
+              </WidgetShell>
 
               <section className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
-                <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-900">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Recent proposals</h2>
-                      <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                        Click a proposal to open the details popup.
-                      </p>
-                    </div>
-                    {proposalsLoading ? <LoadingSpinner /> : null}
-                  </div>
-
+                <WidgetShell
+                  title="Recent proposals"
+                  subtitle="Review the latest transaction requests and open any card to continue the existing proposal flow."
+                  action={proposalsLoading ? <LoadingSpinner /> : null}
+                >
                   {proposalsError ? (
-                    <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/20 dark:text-rose-300">
+                    <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/20 dark:text-rose-300">
                       {proposalsError}
                     </div>
                   ) : null}
 
-                  <div className="mt-4 space-y-4">
-                    {proposals.length > 0 ? (
-                      proposals.slice(0, 4).map((proposal) => (
+                  <div className="space-y-4">
+                    {recentProposalList.length > 0 ? (
+                      recentProposalList.map((proposal) => (
                         <ProposalCard
                           key={proposal.id}
                           proposal={proposal}
                           isActive={proposal.id === selectedProposalId}
-                          onOpen={setSelectedProposalId}
+                          onOpen={handleOpenProposal}
                         />
                       ))
                     ) : (
@@ -1823,90 +2466,77 @@ export default function App() {
                       </div>
                     )}
                   </div>
-                </section>
+                </WidgetShell>
 
-                <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-900">
-                  <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Recent activity</h2>
-                  <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                    A lightweight audit trail for vault, proposal, signing, and execution events.
-                  </p>
-
-                  <div className="mt-4 space-y-3">
-                    {activity.length > 0 ? (
-                      activity.slice(0, 5).map((item) => (
-                        <div
-                          key={item.id}
-                          className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-slate-800/70"
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{item.title}</p>
-                              <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-                                {item.description}
-                              </p>
-                            </div>
-                            <span className="text-xs text-gray-500 dark:text-gray-400">{item.time}</span>
-                          </div>
-                        </div>
-                      ))
+                <WidgetShell
+                  title="Vault overview"
+                  subtitle="Track the vaults already linked to the current dashboard session."
+                  action={vaultsLoading ? <LoadingSpinner /> : null}
+                >
+                  <div className="grid gap-4">
+                    {vaults.length > 0 ? (
+                      vaults.map((vault) => <VaultCard key={vault.id} vault={vault} />)
                     ) : (
                       <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-5 text-sm text-gray-500 dark:border-gray-600 dark:bg-slate-800/70 dark:text-gray-400">
-                        Activity will appear here after you start using the dashboard.
+                        No vaults yet.
                       </div>
                     )}
                   </div>
-                </section>
+                </WidgetShell>
               </section>
 
-              <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-900">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Vaults</h2>
-                    <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                      Treasury configurations created in this session.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="mt-4 grid gap-4 xl:grid-cols-3">
-                  {vaults.length > 0 ? (
-                    vaults.map((vault) => <VaultCard key={vault.id} vault={vault} />)
+              <WidgetShell
+                title="Recent activity"
+                subtitle="A lightweight audit trail for vault creation, proposal signing, approvals, and execution."
+              >
+                <div className="space-y-3">
+                  {activity.length > 0 ? (
+                    activity.slice(0, 5).map((item) => (
+                      <div
+                        key={item.id}
+                        className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-slate-800/70"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{item.title}</p>
+                            <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
+                              {item.description}
+                            </p>
+                          </div>
+                          <span className="text-xs text-gray-500 dark:text-gray-400">{item.time}</span>
+                        </div>
+                      </div>
+                    ))
                   ) : (
-                    <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-5 text-sm text-gray-500 dark:border-gray-600 dark:bg-slate-800/70 dark:text-gray-400 xl:col-span-3">
-                      No vaults yet.
+                    <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-5 text-sm text-gray-500 dark:border-gray-600 dark:bg-slate-800/70 dark:text-gray-400">
+                      Activity will appear here after you start using the dashboard.
                     </div>
                   )}
                 </div>
-              </section>
+              </WidgetShell>
             </>
           ) : null}
 
           {activeSection === 'Proposals' ? (
-            <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-900">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Proposals</h2>
-                  <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                    Click any proposal card to review or act on it in the popup.
-                  </p>
-                </div>
-                {proposalsLoading ? <LoadingSpinner /> : null}
-              </div>
-
+            <WidgetShell
+              title="Proposals"
+              subtitle="Click any proposal card to review it, sign it, approve it, or execute it in the existing popup flow."
+              action={proposalsLoading ? <LoadingSpinner /> : null}
+            >
               {proposalsError ? (
-                <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/20 dark:text-rose-300">
+                <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/20 dark:text-rose-300">
                   {proposalsError}
                 </div>
               ) : null}
 
-              <div className="mt-4 space-y-4">
+              <div className="space-y-4">
                 {proposals.length > 0 ? (
                   proposals.map((proposal) => (
                     <ProposalCard
                       key={proposal.id}
                       proposal={proposal}
                       isActive={proposal.id === selectedProposalId}
-                      onOpen={setSelectedProposalId}
+                      onOpen={handleOpenProposal}
                     />
                   ))
                 ) : (
@@ -1915,22 +2545,17 @@ export default function App() {
                   </div>
                 )}
               </div>
-            </section>
+            </WidgetShell>
           ) : null}
 
           {activeSection === 'Vaults' ? (
             <section className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
-              <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-900">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Vaults</h2>
-                    <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                      Treasury configurations created in this session.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="mt-4 grid gap-4 xl:grid-cols-2">
+              <WidgetShell
+                title="Vaults"
+                subtitle="Treasury configurations created in this session."
+                action={vaultsLoading ? <LoadingSpinner /> : null}
+              >
+                <div className="grid gap-4 xl:grid-cols-2">
                   {vaults.length > 0 ? (
                     vaults.map((vault) => <VaultCard key={vault.id} vault={vault} />)
                   ) : (
@@ -1939,10 +2564,12 @@ export default function App() {
                     </div>
                   )}
                 </div>
-              </section>
+              </WidgetShell>
 
-              <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-900">
-                <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">System status</h2>
+              <WidgetShell
+                title="System status"
+                subtitle="Current wallet, network, backend state, and selected vault context."
+              >
                 <div className="mt-4 space-y-3">
                   <div className="rounded-xl bg-gray-50 p-4 dark:bg-slate-800/80">
                     <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Wallet identity</p>
@@ -1967,14 +2594,13 @@ export default function App() {
                     </p>
                   </div>
                 </div>
-              </section>
+              </WidgetShell>
             </section>
           ) : null}
             </>
           )}
         </div>
       </motion.main>
-      </div>
     </div>
   )
 }

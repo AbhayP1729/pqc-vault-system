@@ -18,6 +18,7 @@ contract MultiAdminVault {
     mapping(uint256 => Proposal) private s_proposals;
     mapping(uint256 => mapping(address => bool)) private s_hasApproved;
 
+    address public immutable relayer;
     uint256 public immutable threshold;
     uint256 public proposalCount;
 
@@ -46,6 +47,7 @@ contract MultiAdminVault {
     );
 
     error NotAdmin();
+    error NotRelayer();
     error InvalidAdmin();
     error DuplicateAdmin(address admin);
     error InvalidThreshold();
@@ -59,6 +61,13 @@ contract MultiAdminVault {
     modifier onlyAdmin() {
         if (!isAdmin[msg.sender]) {
             revert NotAdmin();
+        }
+        _;
+    }
+
+    modifier onlyRelayer() {
+        if (msg.sender != relayer) {
+            revert NotRelayer();
         }
         _;
     }
@@ -99,6 +108,7 @@ contract MultiAdminVault {
             s_admins.push(admin);
         }
 
+        relayer = msg.sender;
         threshold = threshold_;
 
         emit VaultInitialized(admins_, threshold_);
@@ -117,11 +127,15 @@ contract MultiAdminVault {
     }
 
     function createProposal(
+        address proposer,
         address target,
         uint256 value,
         bytes calldata data,
         string calldata description
-    ) external onlyAdmin returns (uint256 proposalId) {
+    ) external onlyRelayer returns (uint256 proposalId) {
+        if (!isAdmin[proposer]) {
+            revert NotAdmin();
+        }
         if (target == address(0)) {
             revert InvalidAdmin();
         }
@@ -130,39 +144,48 @@ contract MultiAdminVault {
         proposalCount++;
 
         Proposal storage proposal = s_proposals[proposalId];
-        proposal.proposer = msg.sender;
+        proposal.proposer = proposer;
         proposal.target = target;
         proposal.value = value;
         proposal.data = data;
         proposal.description = description;
         proposal.createdAt = block.timestamp;
 
-        emit ProposalCreated(proposalId, msg.sender, target, value, data, description);
+        emit ProposalCreated(proposalId, proposer, target, value, data, description);
     }
 
     function approveProposal(
-        uint256 proposalId
-    ) external onlyAdmin proposalExists(proposalId) notExecuted(proposalId) {
-        if (s_hasApproved[proposalId][msg.sender]) {
-            revert ProposalAlreadyApproved(proposalId, msg.sender);
+        uint256 proposalId,
+        address admin
+    ) external onlyRelayer proposalExists(proposalId) notExecuted(proposalId) {
+        if (!isAdmin[admin]) {
+            revert NotAdmin();
+        }
+        if (s_hasApproved[proposalId][admin]) {
+            revert ProposalAlreadyApproved(proposalId, admin);
         }
 
-        s_hasApproved[proposalId][msg.sender] = true;
+        s_hasApproved[proposalId][admin] = true;
         Proposal storage proposal = s_proposals[proposalId];
         proposal.approvalCount++;
 
-        emit ProposalApproved(proposalId, msg.sender, proposal.approvalCount, threshold);
+        emit ProposalApproved(proposalId, admin, proposal.approvalCount, threshold);
     }
 
     function executeProposal(
-        uint256 proposalId
+        uint256 proposalId,
+        address executor
     )
         external
-        onlyAdmin
+        onlyRelayer
         proposalExists(proposalId)
         notExecuted(proposalId)
         returns (bytes memory returnData)
     {
+        if (!isAdmin[executor]) {
+            revert NotAdmin();
+        }
+
         Proposal storage proposal = s_proposals[proposalId];
 
         if (proposal.approvalCount < threshold) {
@@ -179,7 +202,7 @@ contract MultiAdminVault {
             revert ExecutionFailed(result);
         }
 
-        emit ProposalExecuted(proposalId, msg.sender, proposal.target, proposal.value, result);
+        emit ProposalExecuted(proposalId, executor, proposal.target, proposal.value, result);
         return result;
     }
 

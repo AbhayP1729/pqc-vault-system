@@ -2,12 +2,13 @@ import { motion } from 'framer-motion'
 
 import { formatWalletAddress } from '../lib/wallet'
 
+import type { KeyboardEvent } from 'react'
 import type { Proposal } from '../types'
 
 type ProposalCardProps = {
   proposal: Proposal
   isActive: boolean
-  onOpen: (proposalId: string) => void
+  onOpen: (proposal: Proposal) => void
 }
 
 function getProgressWidth(approvals: number, threshold: number) {
@@ -54,11 +55,26 @@ export function ProposalCard({
   const verifiedSignatureCount = proposal.signatures.filter((signature) => signature.isVerified).length
   const approvalSummary = `${proposal.approvals} / ${proposal.threshold} approvals`
 
+  function handleOpen() {
+    onOpen(proposal)
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLElement>) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      handleOpen()
+    }
+  }
+
   return (
     <motion.article
       whileHover={{ scale: 1.02 }}
       transition={{ duration: 0.18 }}
-      className={`rounded-2xl border bg-white p-4 shadow-sm transition duration-200 hover:shadow-md dark:bg-gray-900 ${
+      role="button"
+      tabIndex={0}
+      onClick={handleOpen}
+      onKeyDown={handleKeyDown}
+      className={`cursor-pointer rounded-2xl border bg-white p-4 text-left shadow-md transition duration-200 hover:shadow-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 dark:bg-slate-900 dark:focus-visible:ring-cyan-400 ${
         isActive
           ? 'border-blue-200 bg-blue-50/50 dark:border-cyan-700 dark:bg-cyan-400/5'
           : proposal.status === 'executed'
@@ -66,42 +82,40 @@ export function ProposalCard({
             : 'border-gray-200 dark:border-gray-700'
       }`}
     >
-      <button type="button" onClick={() => onOpen(proposal.id)} className="w-full text-left">
-        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-600 dark:bg-slate-800 dark:text-gray-300">
-                {proposal.id}
-              </span>
-              <span className={`rounded-full border px-3 py-1 text-sm font-medium ${getStatusClasses(proposal.status)}`}>
-                {getStatusLabel(proposal.status)}
-              </span>
-            </div>
-            <h3 className="mt-3 text-lg font-semibold text-gray-900 dark:text-gray-100">
-              {proposal.title}
-            </h3>
-            <p className="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-400">
-              {proposal.description}
-            </p>
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-600 dark:bg-slate-800 dark:text-gray-300">
+              {proposal.id}
+            </span>
+            <span className={`rounded-full border px-3 py-1 text-sm font-medium ${getStatusClasses(proposal.status)}`}>
+              {getStatusLabel(proposal.status)}
+            </span>
           </div>
-
-          <div className="space-y-1 rounded-xl bg-gray-50 p-3 dark:bg-slate-800/80 md:min-w-44 md:text-right">
-            <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Amount</p>
-            <p
-              className="text-lg font-semibold text-gray-900 dark:text-gray-100"
-              title={proposal.amountWei ? `${proposal.amountWei} wei` : undefined}
-            >
-              {proposal.amountEth} ETH
-            </p>
-            <p
-              className="text-xs font-mono text-gray-500 dark:text-gray-400"
-              title={proposal.destination}
-            >
-              {truncateAddress(proposal.destination)}
-            </p>
-          </div>
+          <h3 className="mt-3 text-lg font-semibold text-gray-900 dark:text-gray-100">
+            {proposal.title}
+          </h3>
+          <p className="mt-2 text-sm leading-6 text-gray-600 dark:text-gray-400">
+            {proposal.description}
+          </p>
         </div>
-      </button>
+
+        <div className="space-y-1 rounded-xl bg-gray-50 p-3 dark:bg-slate-800/80 md:min-w-44 md:text-right">
+          <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Amount</p>
+          <p
+            className="text-lg font-semibold text-gray-900 dark:text-gray-100"
+            title={proposal.amountWei ? `${proposal.amountWei} wei` : undefined}
+          >
+            {proposal.amountEth} ETH
+          </p>
+          <p
+            className="text-xs font-mono text-gray-500 dark:text-gray-400"
+            title={proposal.destination}
+          >
+            {truncateAddress(proposal.destination)}
+          </p>
+        </div>
+      </div>
 
       <div className="mt-4">
         <div className="mb-2 flex items-center justify-between text-sm text-gray-500 dark:text-gray-400">
