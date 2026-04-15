@@ -1,311 +1,249 @@
-# Quantum-Safe Multi-Admin Vault System
+# Quantum-Safe Multi-Admin Vault on Ethereum Sepolia
 
-A full-stack vault approval system that adds a post-quantum authorization layer to Ethereum transaction execution. The application combines Dilithium signatures, threshold-based multi-admin approvals, a FastAPI verification backend, a Solidity vault contract, and a React dashboard with MetaMask-based operator gating for Ethereum Sepolia.
+## 1. Project Title
+Quantum-Safe Multi-Admin Vault on Ethereum Sepolia
 
-## Description
+## 2. Overview
+This project is a full-stack treasury workflow that combines post-quantum cryptography, threshold-based multi-admin approvals, and real Ethereum Sepolia execution. Admins create vault-backed transfer proposals, sign a canonical proposal message with a PQC algorithm, record verified approvals, and execute only after the configured threshold is reached.
 
-The Quantum-Safe Multi-Admin Vault System is designed for treasury-style workflows where sensitive blockchain transactions should not be executed by a single operator. Admins create proposals, sign canonical proposal payloads with post-quantum cryptography, record verified approvals, and execute only after the configured approval threshold is met.
+Why PQC matters: Ethereum transactions still rely on classical signatures, but treasury governance can add a quantum-safe approval layer before a transaction is ever relayed onchain. In this implementation, PQC signatures are generated and verified offchain with `liboqs-python`, while actual proposal creation, approval relays, and execution happen on Sepolia through `ethers.js`.
 
-The current codebase includes:
+Real-world relevance: this is the kind of architecture you would use for treasury controls, multi-sig style governance, regulated operational wallets, or any workflow where one wallet should not be able to move funds alone.
 
-- A React, Tailwind CSS, and Framer Motion frontend for vault and proposal operations.
-- A FastAPI backend that persists vaults, proposals, signatures, approvals, and execution receipts in SQLite.
-- A Dilithium wrapper around `liboqs-python` for key generation, signing, and verification.
-- A Hardhat Solidity contract named `MultiAdminVault` for onchain threshold vault execution.
-- A Node.js and ethers.js bridge that submits real Sepolia transactions and returns confirmed transaction hashes.
+## 3. Key Features
+- Threshold-based multi-admin vaults with configurable approval counts.
+- PQC signing with `Dilithium2`, `Falcon-512`, and `SPHINCS+-SHA2-128f-simple`.
+- Real Sepolia smart contract deployment and real Sepolia transaction execution.
+- Solidity `MultiAdminVault` contract with on-chain proposal storage, approvals, and execution.
+- FastAPI backend for vault management, proposal tracking, signature verification, and execution orchestration.
+- SQLite persistence for vaults, admins, proposals, signatures, approvals, and signature audit logs.
+- Signature audit trail plus UI execution timeline and backend execution trace.
+- MetaMask integration for wallet identity, Sepolia network gating, and admin-specific actions.
+- Automatic PQC key generation and wallet-specific PQC key registration.
+- Etherscan-ready transaction hashes after successful execution.
 
-## Problem Statement
+## 4. System Architecture
+Frontend:
+- React + TypeScript + Vite dashboard in `frontend/Q-DAY-VAULT`.
+- Tailwind CSS and Framer Motion for the vault dashboard, proposal flow, signature status, and execution timeline.
+- MetaMask is used for wallet identity and Sepolia gating.
 
-Most blockchain wallets and smart contract admin flows rely on classical elliptic-curve signatures such as ECDSA over `secp256k1`. A sufficiently capable fault-tolerant quantum computer running Shor's algorithm would threaten the discrete logarithm assumptions behind these signatures. For high-value vaults, governance systems, and treasury operators, that creates a long-term risk: public blockchain data is durable, while exposed public keys and historical signatures may remain useful to future attackers.
+Backend:
+- FastAPI application in `backend/main.py`.
+- Main API routes: `/pqc/algorithms`, `/pqc/register-wallet`, `/vaults`, `/proposals`, `/create-vault`, `/create-proposal`, `/sign-proposal`, `/approve-proposal`, `/verify-signature`, and `/execute`.
+- SQLite database in `backend/vaults.db` by default, with optional override via `VAULT_DB_PATH`.
 
-This project explores a hybrid mitigation path. It does not make Ethereum itself post-quantum. Instead, it adds a post-quantum approval plane before blockchain execution, so sensitive proposals require verified Dilithium signatures and threshold approvals before a Sepolia transaction is submitted.
+PQC layer:
+- `pqc/dilithium.py` wraps `liboqs-python` for key generation, signing, and verification.
+- Wallet-scoped keys are stored under `keys/<wallet-address>/` as `dilithium.json`, `falcon.json`, and `sphincs.json`.
+- The backend stores verified signatures separately from approvals and also writes a signature audit log.
 
-## Features
+Blockchain layer:
+- Solidity contract: `contracts/MultiAdminVault.sol`.
+- Hardhat compiles the contract and produces the artifact consumed by the backend bridge at `artifacts/contracts/MultiAdminVault.sol/MultiAdminVault.json`.
+- `backend/ethers_runner.mjs` uses `ethers.js` and a relayer wallet from `.env` to deploy vaults and submit real Sepolia transactions.
 
-- PQC-based signatures using Dilithium through `liboqs-python`.
-- Multi-admin vault creation with configurable approval thresholds.
-- Separate proposal signing and approval stages for clearer auditability.
-- Real-time blockchain execution through ethers.js and Ethereum Sepolia.
-- MetaMask integration for wallet identity, Sepolia network gating, and UI session state.
-- Proposal lifecycle tracking across proposed, signed, approved, and executed states.
-- SQLite-backed persistence for vaults, admins, proposals, signatures, approvals, and execution hashes.
-- Etherscan transaction links after successful Sepolia execution.
-- Solidity `MultiAdminVault` contract with threshold-gated proposal approval and execution.
-
-## Tech Stack
-
-| Layer | Technology |
-| --- | --- |
-| Frontend | React, Vite, TypeScript, Tailwind CSS, Framer Motion, ethers.js |
-| Backend | FastAPI, Pydantic, SQLite |
-| PQC | Dilithium2, `liboqs-python`, base64-encoded key and signature payloads |
-| Blockchain | Solidity `0.8.28`, Hardhat 3, ethers.js, Ethereum Sepolia |
-| Wallet | MetaMask |
-
-## System Architecture
-
-Conceptual flow: `UI -> PQC approval layer -> Backend verification engine -> Smart Contract -> Blockchain`.
-
-In this implementation, the FastAPI backend orchestrates the PQC module, persists approvals, and then submits execution through the ethers.js bridge.
+High-level flow:
 
 ```text
-React UI + MetaMask
+React + MetaMask
         |
         v
 FastAPI Backend
         |
         v
-PQC Module: Dilithium key generation, signing, verification
+PQC Sign / Verify with liboqs-python
         |
         v
-Approval Store: SQLite vaults, proposals, signatures, approvals
+SQLite State + Signature Audit Log
         |
         v
-Execution Bridge: Node.js + ethers.js
+ethers.js Bridge
         |
         v
-MultiAdminVault / Sepolia transaction execution
-        |
-        v
-Ethereum Sepolia + transaction hash returned to UI
+MultiAdminVault.sol on Sepolia
 ```
 
-Runtime flow:
+## 5. Workflow (Step-by-step)
+1. Wallet connect: the frontend requires MetaMask and blocks vault actions until the connected wallet is on Sepolia.
+2. Vault creation: the user enters a vault name, admin count, threshold, and one wallet address per admin. The current UI rotates the initial PQC algorithm assignment across Dilithium, Falcon, and SPHINCS+.
+3. Contract deployment: if no existing `contract_address` is provided, the backend deploys `MultiAdminVault` on Sepolia using the admin wallet list and threshold. If a contract address is provided, the vault links to that deployed contract instead.
+4. Funding vault: after deployment, send Sepolia ETH to the vault contract address. The contract has a `receive()` function, and the frontend reads the live contract balance.
+5. Proposal creation: the user selects a vault, recipient, and ETH amount. The backend normalizes the transfer, stores the proposal locally, and for vault-backed flows also creates the on-chain proposal unless an `onchain_proposal_id` is supplied.
+6. PQC signing: a registered admin wallet selects a PQC algorithm in the proposal modal. The backend resolves or generates the corresponding key, signs the canonical message, verifies it immediately, and stores the verified signature plus audit entry.
+7. Multi-admin approval: the same wallet that produced the verified PQC signature records the approval. For vault-backed proposals, the backend also relays the on-chain approval to `approveProposal(...)`.
+8. Execution: once the threshold is met, a registered admin executes the proposal. For vault-backed flows the backend calls `executeProposal(...)` on the Sepolia vault contract. A legacy direct-transfer fallback also exists in the backend, but the current UI is built around vault-contract mode.
+9. Etherscan verification: after execution, the UI shows the transaction hash and a direct Sepolia Etherscan link.
 
-1. The UI connects to MetaMask and requires Sepolia.
-2. A vault is created with a threshold and one or more admin identities.
-3. The backend generates or registers Dilithium admin public keys.
-4. A proposal is created with destination, amount, metadata, and a canonical message to sign.
-5. The backend signs and verifies the proposal message using Dilithium.
-6. The backend records approvals only after a verified PQC signature exists.
-7. When approvals meet the threshold, `/execute` submits the blockchain transaction.
-8. The transaction hash is persisted and displayed in the frontend.
+## 6. Prerequisites
+- A recent Node.js LTS release with `npm`.
+- Python 3.10+ with `pip`.
+- `liboqs` / `liboqs-python` available in your Python environment.
+- MetaMask installed in the browser.
+- Sepolia ETH for the backend relayer wallet and for any wallet you use to manually fund the vault contract.
 
-The backend supports two execution modes:
+## 7. Environment Setup
+Create a root `.env` file:
 
-- Direct transfer mode, where the backend execution wallet sends Sepolia ETH to the proposal destination.
-- Vault contract mode, where `/execute` calls `executeProposal(uint256)` on a configured `MultiAdminVault` contract when `contract_address` and an onchain proposal id or `execution_mode=vault_contract` payload are supplied.
-
-## Project Structure
-
-```text
-backend/                  FastAPI app, SQLite schema, ethers.js bridge wrapper
-pqc/                      Dilithium key generation, signing, and verification helpers
-contracts/                Solidity contracts, including MultiAdminVault.sol
-test/                     Hardhat tests for MultiAdminVault
-frontend/Q-DAY-VAULT/     React + Vite dashboard
-scripts/                  Hardhat example scripts
-ignition/modules/         Hardhat Ignition examples
-keys/                     Generated Dilithium key files, keep private
-.env.example              Required environment variable template
+```env
+SEPOLIA_RPC_URL=
+SEPOLIA_PRIVATE_KEY=
+SEPOLIA_VAULT_CONTRACT_ADDRESS=
+BACKEND_CORS_ORIGINS=
 ```
 
-## Installation Guide
+Variable reference:
+- `SEPOLIA_RPC_URL`: Sepolia RPC endpoint used by Hardhat and by the backend `ethers.js` bridge for deployment, proposal relays, approvals, and execution.
+- `SEPOLIA_PRIVATE_KEY`: 0x-prefixed private key for the backend relayer wallet. This is the wallet that pays gas for the current on-chain workflow.
+- `SEPOLIA_VAULT_CONTRACT_ADDRESS`: Optional fallback contract address. Use it when linking an already deployed vault contract or when a vault record does not already have a stored contract address.
+- `BACKEND_CORS_ORIGINS`: Comma-separated list of frontend origins allowed to call FastAPI. For local development, `http://localhost:5173` should be included.
 
-### 1. Clone the Repository
+Optional environment variable:
+- `VAULT_DB_PATH`: Overrides the default SQLite database path. If omitted, the backend uses `backend/vaults.db`.
+
+Notes:
+- `.env` is already ignored by Git.
+- The frontend API base URL is currently hardcoded to `http://localhost:8000` in `frontend/Q-DAY-VAULT/src/api.js`.
+
+## 8. IMPORTANT: Gas & Wallet Requirement
+The backend wallet from `SEPOLIA_PRIVATE_KEY` must have Sepolia ETH.
+
+In the current implementation, that wallet is used for:
+- Vault contract deployment.
+- On-chain proposal creation.
+- On-chain approval relays.
+- Final on-chain execution.
+
+How to derive the wallet address from the private key:
 
 ```bash
-git clone <your-repository-url>
-cd Q_DAY
+node --input-type=module -e "import { Wallet } from 'ethers'; console.log(new Wallet(process.argv[1]).address)" 0xYOUR_PRIVATE_KEY
 ```
 
-### 2. Configure Environment Variables
+How to fund it:
+1. Copy the derived address.
+2. Request Sepolia ETH from a faucet or transfer Sepolia ETH from another funded test wallet.
+3. Confirm the balance before creating a vault or executing a proposal.
 
-Create a local `.env` file from the example:
+Important distinction:
+- MetaMask is used for admin identity and wallet selection in the UI.
+- The backend relayer wallet is the one paying gas for the current smart contract flow.
+
+## 9. Installation Steps (Step-by-step)
+1. Clone the repository and install root dependencies:
+
+```bash
+git clone <your-repo-url>
+cd Q_DAY
+npm install
+```
+
+2. Create the `.env` file from the example:
 
 ```bash
 cp .env.example .env
 ```
 
-On Windows PowerShell:
+PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Fill in your Sepolia RPC URL, funded execution wallet private key, deployed vault contract address if using contract execution, and allowed frontend origins.
+3. Backend setup:
 
-### 3. Setup Backend
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install fastapi uvicorn pydantic liboqs-python
+uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+```
 
-Create and activate a Python virtual environment:
+Bash activation alternative:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 ```
 
-On Windows PowerShell:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-Install backend dependencies:
-
-```bash
-pip install fastapi uvicorn pydantic liboqs-python
-```
-
-`liboqs-python` requires the Open Quantum Safe native library stack. If installation fails, install the platform-specific `liboqs` prerequisites first, then retry the Python package installation.
-
-### 4. Setup Frontend
+4. Frontend setup:
 
 ```bash
 cd frontend/Q-DAY-VAULT
 npm install
+npm run dev
+```
+
+5. Contract setup:
+
+```bash
 cd ../..
-```
-
-### 5. Setup Contracts
-
-Install Hardhat dependencies from the repository root:
-
-```bash
-npm install
-```
-
-Compile the contracts:
-
-```bash
 npx hardhat compile
 ```
 
-Run the contract tests:
+Compile before using the app. The backend bridge reads the compiled vault artifact from `artifacts/contracts/MultiAdminVault.sol/MultiAdminVault.json`.
 
-```bash
-npx hardhat test test/MultiAdminVault.ts
-```
-
-## Environment Variables
-
-The `.env.example` file documents the required runtime variables:
-
-```env
-SEPOLIA_RPC_URL=https://sepolia.infura.io/v3/YOUR_PROJECT_ID
-SEPOLIA_PRIVATE_KEY=YOUR_SEPOLIA_PRIVATE_KEY
-SEPOLIA_VAULT_CONTRACT_ADDRESS=0xYourVaultContractAddress
-BACKEND_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
-```
-
-| Variable | Purpose |
-| --- | --- |
-| `SEPOLIA_RPC_URL` | Sepolia RPC endpoint used by Hardhat and the backend ethers.js bridge. |
-| `SEPOLIA_PRIVATE_KEY` | Private key for the funded Sepolia execution wallet. Do not commit this value. |
-| `SEPOLIA_VAULT_CONTRACT_ADDRESS` | Deployed `MultiAdminVault` contract address used when contract execution is requested. |
-| `BACKEND_CORS_ORIGINS` | Comma-separated list of frontend origins allowed to call the FastAPI backend. |
-
-Generated Dilithium keypairs are written under `keys/`. Treat this directory as sensitive secret material.
-
-## Running the Project
-
-### Start the Backend
-
-From the repository root:
+## 10. Running the Project
+1. Start the backend:
 
 ```bash
 uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-The API will be available at:
-
-```text
-http://127.0.0.1:8000
-```
-
-Main backend endpoints:
-
-```text
-GET  /proposals
-POST /create-vault
-POST /create-proposal
-POST /sign-proposal
-POST /approve-proposal
-POST /verify-signature
-POST /execute
-```
-
-### Start the Frontend
-
-In a separate terminal:
+2. Start the frontend:
 
 ```bash
 cd frontend/Q-DAY-VAULT
 npm run dev
 ```
 
-Open the Vite URL, usually:
+3. Connect MetaMask and switch to Sepolia.
+4. Create a vault. If you leave the contract address blank, the backend will deploy `MultiAdminVault` on Sepolia automatically.
+5. Fund the vault by sending Sepolia ETH to the deployed contract address from MetaMask or another funded Sepolia wallet.
+6. Create a proposal in the dashboard flow. If the vault is contract-backed, the backend also creates the on-chain proposal unless you manually provide an existing `onchain_proposal_id`.
+7. Sign the proposal with PQC in the proposal modal.
+8. Approve it from the same wallet that produced the verified signature.
+9. Execute it once the threshold is reached.
+10. Open the returned transaction hash on Sepolia Etherscan from the proposal modal.
 
-```text
-http://localhost:5173
-```
-
-### Deploy the Contract, If Needed
-
-If you already have a deployed `MultiAdminVault` on Sepolia, set `SEPOLIA_VAULT_CONTRACT_ADDRESS` in `.env` and skip deployment.
-
-The current repository includes the `MultiAdminVault.sol` contract and a Counter Ignition example, but it does not include a dedicated `MultiAdminVault` deployment module yet. To deploy the vault contract to Sepolia, add a Hardhat Ignition module or deployment script that passes:
-
-- `admins`: an array of Ethereum admin addresses.
-- `threshold`: the required number of onchain approvals.
-- optional deployment value: Sepolia ETH to fund the vault.
-
-Then deploy with the Sepolia network:
+## 11. Testing Guide
+1. Create a `2-of-3` or `3-of-3` vault with three real Sepolia admin addresses.
+2. Use separate browser profiles or incognito windows with MetaMask to simulate multiple admins cleanly.
+3. Have Admin 1 create the proposal and sign it.
+4. Have Admin 2 switch in, sign the same proposal, and approve it.
+5. If your threshold requires more approvals, repeat with Admin 3.
+6. Execute the proposal from any registered admin wallet after the threshold is met.
+7. Test all PQC algorithms by clicking `Register all PQC algorithms` in the proposal modal, then signing proposals with Dilithium, Falcon, and SPHINCS+ from the registered admin wallet.
+8. Remember that approval must come from the same wallet that created the verified PQC signature.
+9. Run the contract tests locally if you want to validate contract behavior in isolation:
 
 ```bash
-npx hardhat ignition deploy --network sepolia ignition/modules/<YourVaultModule>.ts
+npx hardhat test test/MultiAdminVault.ts
 ```
 
-After deployment, update:
+## 12. Common Issues & Fixes
+- `Insufficient gas`: the relayer wallet from `SEPOLIA_PRIVATE_KEY` is underfunded. Fund that address with Sepolia ETH, then retry deployment, approval, or execution.
+- `Value 0 ETH confusion`: the current dashboard flow is transfer-focused and rejects zero-value amounts. Use a value greater than `0`, or extend the UI/backend if you need zero-value contract-call proposals.
+- `Wallet not registered for algorithm`: make sure the connected MetaMask account is one of the vault admin wallets. In the proposal modal, click `Register all PQC algorithms` to generate missing keys for Dilithium, Falcon, and SPHINCS+.
+- `Cannot switch admin`: switch MetaMask to another admin account, reconnect if necessary, and refresh the page if the old session persists. Separate browser profiles or incognito windows are the easiest way to simulate multiple admins.
+- `Faucet requires mainnet ETH`: some Sepolia faucets use anti-abuse checks. Use a different Sepolia faucet, a provider-backed faucet, or transfer test ETH from another funded Sepolia wallet.
+- `Frontend cannot reach backend`: the frontend points to `http://localhost:8000` in `frontend/Q-DAY-VAULT/src/api.js`. If your backend runs elsewhere, update that file and keep `BACKEND_CORS_ORIGINS` in sync.
 
-```env
-SEPOLIA_VAULT_CONTRACT_ADDRESS=<deployed-contract-address>
-```
+## 13. Screenshots (Optional placeholders)
+**Dashboard**  
+_Add a screenshot of the main dashboard with the connected MetaMask wallet, vault cards, and recent proposals._
 
-## Usage
+**Proposal Modal**  
+_Add a screenshot of the proposal details modal showing PQC verification, approvals, signature audit log, and action buttons._
 
-1. Open the frontend and connect MetaMask.
-2. Switch MetaMask to Ethereum Sepolia when prompted.
-3. Create a vault by entering a vault name, admin count, and approval threshold.
-4. Create a proposal by selecting the vault, entering a title, recipient address, and ETH amount.
-5. Open the proposal details modal.
-6. Click `Sign with PQC` to generate and verify a Dilithium signature for the proposal.
-7. Click `Approve` to record the verified admin approval.
-8. Repeat signing and approval until the threshold is reached.
-9. Click `Execute` to submit the Sepolia transaction.
-10. Review the returned transaction hash and open the Etherscan link from the proposal modal.
+**Execution Trace**  
+_Add a screenshot of a successfully executed proposal with the transaction hash, Etherscan link, and execution timeline._
 
-For contract-backed execution, create or link the matching onchain proposal, include the onchain proposal id or contract execution payload when creating the backend proposal, and ensure `SEPOLIA_VAULT_CONTRACT_ADDRESS` is configured.
+## 14. Future Improvements
+- MetaMask-only execution so the admin wallet, not the backend relayer, pays gas.
+- Layer 2 support for cheaper approval and execution flows.
+- zk + PQC hybrid authorization for stronger privacy and verification guarantees.
+- Better UI analytics for approval latency, signer activity, and treasury health.
 
-## Screenshots
-
-Add project screenshots here after capturing the running application:
-
-```text
-docs/screenshots/dashboard.png
-docs/screenshots/proposal-modal.png
-docs/screenshots/execution-confirmation.png
-```
-
-Suggested views:
-
-- Dashboard with connected Sepolia wallet.
-- Vault creation form and live vault card.
-- Proposal lifecycle modal showing signing, approval, and execution.
-- Etherscan transaction confirmation.
-
-## Future Improvements
-
-- Add a dedicated Hardhat Ignition module for deploying `MultiAdminVault`.
-- Add frontend controls for contract-backed proposal creation and `onchain_proposal_id` linking.
-- Add a `/vaults` API endpoint so the frontend can rehydrate vaults across browser sessions.
-- Add a `requirements.txt` or `pyproject.toml` for reproducible backend setup.
-- Move generated PQC private keys into a secure keystore or HSM-backed storage layer.
-- Add authentication and role binding between MetaMask addresses and registered PQC admins.
-- Add WebSocket or server-sent event updates for live proposal state changes.
-- Add integration tests for FastAPI, PQC signing, and Sepolia execution error handling.
-- Add a repository-level deployment guide and screenshots.
-
-## License
-
-The `MultiAdminVault.sol` contract is marked with the MIT SPDX license identifier. Add a repository-level `LICENSE` file before publishing the full project under a formal license.
+## 15. License
+MIT
